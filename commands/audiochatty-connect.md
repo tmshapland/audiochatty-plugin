@@ -1,11 +1,11 @@
 ---
-description: Register this Claude Code session as a contact in AudioChat
+description: Register this Claude Code session as a contact in audiochatty
 argument-hint: [name]
 disable-model-invocation: true
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/audiochat.py" *)
 ---
 
-# Registering this session with AudioChat
+# Registering this session with audiochatty
 
 ```!
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/audiochat.py" connect --session-id "${CLAUDE_SESSION_ID}" "$ARGUMENTS"

@@ -1,4 +1,4 @@
-"""A stub AudioChat backend, so the plugin's tests run with nothing installed.
+"""A stub audiochatty backend, so the plugin's tests run with nothing installed.
 
 `coding_agent_build_plan.md` Phase 5 asks for tests that run without Claude Code. This is
 the other half of that: tests that run without Flask, without Supabase, and without a

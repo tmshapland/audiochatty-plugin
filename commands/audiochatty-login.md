@@ -1,10 +1,10 @@
 ---
-description: Pair this machine with AudioChat
+description: Pair this machine with audiochatty
 disable-model-invocation: true
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/audiochat.py" *)
 ---
 
-# Pairing this machine with AudioChat
+# Pairing this machine with audiochatty
 
 ```!
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/audiochat.py" login

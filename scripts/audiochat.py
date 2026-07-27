@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The AudioChat plugin's whole client — shared library and CLI in one file.
+"""The audiochatty plugin's whole client — shared library and CLI in one file.
 
 `coding_agent_build_plan.md` Phase 5 · `coding_agent_summary_plan.md` §5.
 
@@ -14,10 +14,10 @@ Four subcommands, one per slash command, plus the two hook scripts that import t
     status      local-only: is this machine paired, is this session registered
     disconnect  retire this session
 
-**What is on disk, and why so little.** `~/.audiochat/` (0700) holds a credentials file
+**What is on disk, and why so little.** `~/.audiochatty/` (0700) holds a credentials file
 (0600) with the device token, a `sessions/` directory of marker files, and — only while a
 pairing is in flight — a `pending.json` holding the `device_code`. Nothing else, and no
-process: between turns the machine is doing nothing on AudioChat's behalf (§2).
+process: between turns the machine is doing nothing on audiochatty's behalf (§2).
 
 **The token is never printed and never taken as an argument.** Anything typed into a
 Claude Code prompt lands in the session `.jsonl` and in the model's context, and anything
@@ -39,7 +39,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# The deployed backend. `AUDIOCHAT_BACKEND_URL` or `--backend-url` beats it, and once a
+# The deployed backend. `AUDIOCHATTY_BACKEND_URL` or `--backend-url` beats it, and once a
 # machine is paired the URL it paired against is remembered in the credentials file — a
 # device token is only valid at the backend that minted it, so the two belong together.
 DEFAULT_BACKEND_URL = "https://audiochat-backend.onrender.com"
@@ -54,21 +54,21 @@ HOOK_TIMEOUT = 2.5
 # hung, and the flow is resumable by running it again.
 DEFAULT_LOGIN_WAIT = 45.0
 
-USER_AGENT = "audiochat-plugin/0.1.0"
+USER_AGENT = "audiochatty-plugin/0.1.0"
 
 
 # -- where state lives -----------------------------------------------------------------
 
 
 def config_dir() -> Path:
-    """`~/.audiochat`, created 0700 on first use.
+    """`~/.audiochatty`, created 0700 on first use.
 
-    `AUDIOCHAT_HOME` overrides it. That exists for the test suite, which must never touch
+    `AUDIOCHATTY_HOME` overrides it. That exists for the test suite, which must never touch
     a real developer's credentials, and it is the reason every test in this repo can run
     on a machine that is already paired.
     """
-    override = os.environ.get("AUDIOCHAT_HOME")
-    base = Path(override) if override else Path.home() / ".audiochat"
+    override = os.environ.get("AUDIOCHATTY_HOME")
+    base = Path(override) if override else Path.home() / ".audiochatty"
     base.mkdir(mode=0o700, parents=True, exist_ok=True)
     # An existing directory keeps its own mode, so tighten it rather than trust it.
     try:
@@ -151,7 +151,7 @@ def backend_url(override: str | None = None) -> str:
     `--backend-url` run against local Flask works on a machine already paired to prod."""
     if override:
         return override.rstrip("/")
-    from_env = os.environ.get("AUDIOCHAT_BACKEND_URL")
+    from_env = os.environ.get("AUDIOCHATTY_BACKEND_URL")
     if from_env:
         return from_env.rstrip("/")
     stored = read_json(credentials_path()).get("backend_url")
@@ -339,7 +339,7 @@ def _login_start(base: str, label: str | None) -> int:
         print(f"Could not start pairing: {exc}")
         return 1
     except TransportError as exc:
-        print(f"Could not reach AudioChat at {base} ({exc}).")
+        print(f"Could not reach audiochatty at {base} ({exc}).")
         return 1
 
     user_code = str(response.get("user_code") or "")
@@ -370,7 +370,7 @@ def _login_start(base: str, label: str | None) -> int:
     print(f"      {user_code}")
     print()
     print(f"It expires in {int(expires_in // 60)} minutes.")
-    print("Once you've entered it, run /audiochat-login again to finish.")
+    print("Once you've entered it, run /audiochatty-login again to finish.")
     return 0
 
 
@@ -395,8 +395,8 @@ def _login_collect(pending: dict, base: str, wait: float) -> int:
                 "/device/token", {"device_code": device_code}, base_url=base, timeout=CLI_TIMEOUT
             )
         except TransportError as exc:
-            print(f"Could not reach AudioChat at {base} ({exc}).")
-            print("Your code is still valid — run /audiochat-login again to retry.")
+            print(f"Could not reach audiochatty at {base} ({exc}).")
+            print("Your code is still valid — run /audiochatty-login again to retry.")
             return 1
         except ApiError as exc:
             error = str(exc.payload.get("error") or "")
@@ -410,17 +410,17 @@ def _login_collect(pending: dict, base: str, wait: float) -> int:
                 continue
             if error == "expired_token":
                 pending_path().unlink(missing_ok=True)
-                print("That code expired. Run /audiochat-login to get a new one.")
+                print("That code expired. Run /audiochatty-login to get a new one.")
                 return 1
             if error == "access_denied":
                 pending_path().unlink(missing_ok=True)
-                print("That pairing was declined. Run /audiochat-login to start over.")
+                print("That pairing was declined. Run /audiochatty-login to start over.")
                 return 1
             # `invalid_grant` covers a code that was already redeemed as well as one the
             # backend has never heard of — indistinguishable from here, and the fix is
             # the same either way.
             pending_path().unlink(missing_ok=True)
-            print("That pairing code is no longer valid. Run /audiochat-login to start over.")
+            print("That pairing code is no longer valid. Run /audiochatty-login to start over.")
             return 1
 
         return _login_finish(response, base)
@@ -430,7 +430,7 @@ def _login_still_waiting(pending: dict, expires_at: float) -> int:
     remaining = max(int(expires_at - time.time()), 0)
     print(f"Still waiting for {pending.get('user_code')} to be approved.")
     print(f"Open {pending.get('verification_uri')} and enter it — {remaining // 60}m left.")
-    print("Then run /audiochat-login again.")
+    print("Then run /audiochatty-login again.")
     return 0
 
 
@@ -440,7 +440,7 @@ def _login_finish(response: dict, base: str) -> int:
     file it writes is the only place it exists on this machine."""
     token = response.get("token")
     if not token:
-        print("Pairing failed: the backend returned no token. Run /audiochat-login again.")
+        print("Pairing failed: the backend returned no token. Run /audiochatty-login again.")
         return 1
 
     write_private_json(
@@ -459,10 +459,10 @@ def _login_finish(response: dict, base: str) -> int:
     pending_path().unlink(missing_ok=True)
     reset_breaker()
 
-    workspace = response.get("workspace_name") or "AudioChat"
+    workspace = response.get("workspace_name") or "audiochatty"
     who = response.get("profile_name")
     print(f"Linked to {workspace}" + (f" as {who}." if who else "."))
-    print("Run /audiochat-connect in any session you want to hear about.")
+    print("Run /audiochatty-connect in any session you want to hear about.")
     return 0
 
 
@@ -476,7 +476,7 @@ def cmd_connect(args: argparse.Namespace) -> int:
     skipped, or done twice."""
     token = device_token()
     if not token:
-        print("This machine isn't paired with AudioChat yet. Run /audiochat-login first.")
+        print("This machine isn't paired with audiochatty yet. Run /audiochatty-login first.")
         return 1
 
     claude_session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
@@ -496,12 +496,15 @@ def cmd_connect(args: argparse.Namespace) -> int:
         )
     except ApiError as exc:
         if exc.status == 401:
-            print("This machine's AudioChat token was revoked. Run /audiochat-login to pair again.")
+            print(
+                "This machine's audiochatty token was revoked. "
+                "Run /audiochatty-login to pair again."
+            )
             return 1
         print(f"Couldn't register this session: {exc}")
         return 1
     except TransportError as exc:
-        print(f"Couldn't reach AudioChat ({exc}). This session is not registered.")
+        print(f"Couldn't reach audiochatty ({exc}). This session is not registered.")
         return 1
 
     registered_name = response.get("name") or name
@@ -509,7 +512,7 @@ def cmd_connect(args: argparse.Namespace) -> int:
         marker_path(claude_session_id),
         {
             "claude_session_id": claude_session_id,
-            # The backend's uuid for the registration, kept for /audiochat-status and for
+            # The backend's uuid for the registration, kept for /audiochatty-status and for
             # debugging a message that arrived under the wrong name.
             "session_id": response.get("session_id"),
             "name": registered_name,
@@ -518,7 +521,7 @@ def cmd_connect(args: argparse.Namespace) -> int:
         },
     )
     reset_breaker()
-    print(f'This session is now "{registered_name}" in AudioChat.')
+    print(f'This session is now "{registered_name}" in audiochatty.')
     return 0
 
 
@@ -532,10 +535,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     claude_session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
 
     if not credentials.get("token"):
-        print("This machine isn't paired with AudioChat. Run /audiochat-login to pair it.")
+        print("This machine isn't paired with audiochatty. Run /audiochatty-login to pair it.")
         return 0
 
-    workspace = credentials.get("workspace_name") or "AudioChat"
+    workspace = credentials.get("workspace_name") or "audiochatty"
     who = credentials.get("profile_name")
     print(f"Paired with {workspace}" + (f" as {who}." if who else "."))
     if credentials.get("label"):
@@ -544,10 +547,10 @@ def cmd_status(args: argparse.Namespace) -> int:
     marker = load_marker(claude_session_id)
     if marker:
         print(f'This session is registered as "{marker.get("name")}".')
-        print("Every turn you finish here is sent to AudioChat.")
+        print("Every turn you finish here is sent to audiochatty.")
     else:
         print("This session is NOT registered — nothing from it is being sent.")
-        print("Run /audiochat-connect [name] to start.")
+        print("Run /audiochatty-connect [name] to start.")
 
     others = _other_registered_sessions(claude_session_id)
     if others:
@@ -593,13 +596,13 @@ def cmd_disconnect(args: argparse.Namespace) -> int:
     marker_path(claude_session_id).unlink(missing_ok=True)
 
     if not marker:
-        print("This session wasn't registered with AudioChat.")
+        print("This session wasn't registered with audiochatty.")
         return 0
 
     name = marker.get("name") or "this session"
     token = device_token()
     if not token:
-        print(f'Stopped sending "{name}" to AudioChat.')
+        print(f'Stopped sending "{name}" to audiochatty.')
         return 0
 
     try:
@@ -613,7 +616,7 @@ def cmd_disconnect(args: argparse.Namespace) -> int:
         # Local state is already correct. Saying more would be noise about a background
         # detail the user did not ask about.
         pass
-    print(f'Stopped sending "{name}" to AudioChat.')
+    print(f'Stopped sending "{name}" to audiochatty.')
     return 0
 
 
@@ -690,15 +693,17 @@ def _now_iso() -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="audiochat", description="AudioChat for Claude Code")
+    parser = argparse.ArgumentParser(
+        prog="audiochatty", description="audiochatty for Claude Code"
+    )
     parser.add_argument(
         "--backend-url",
         default=None,
-        help="Override the AudioChat backend (also AUDIOCHAT_BACKEND_URL).",
+        help="Override the audiochatty backend (also AUDIOCHATTY_BACKEND_URL).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    login = sub.add_parser("login", help="Pair this machine with AudioChat.")
+    login = sub.add_parser("login", help="Pair this machine with audiochatty.")
     login.add_argument("--label", default=None, help="What to call this machine.")
     login.add_argument("--wait", type=float, default=DEFAULT_LOGIN_WAIT)
     login.add_argument("--reset", action="store_true", help="Discard a pending code.")

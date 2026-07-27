@@ -1,11 +1,10 @@
-# AudioChat for Claude Code
+# audiochatty for Claude Code
 
-Turn a Claude Code session into a contact in [AudioChat](https://github.com/tmshapland).
+Turn a Claude Code session into a contact in [audiochatty](https://github.com/tmshapland).
 When a session you've opted in finishes a turn, a short spoken summary of what it did shows
-up in your AudioChat inbox. You listen to it in the next browser window over, or on your
-phone, and you can ask follow-up questions out loud.
+up in your audiochatty inbox. You listen to it and you can ask follow-up questions out loud.
 
-The flow is **one-directional: your laptop → AudioChat.** Nothing is ever pushed back into
+The flow is **one-directional: your laptop → audiochatty.** Nothing is ever pushed back into
 your session, and nothing this plugin installs can type into your terminal.
 
 ---
@@ -19,9 +18,9 @@ below is in this repo, in the files it names.
 | --- | --- |
 | **Runtime** | Python 3, standard library only. No pip, no venv, no node, no build step. |
 | **Background processes** | None. The hooks are short-lived processes Claude Code spawns, waits on, and discards. |
-| **On disk** | `~/.audiochat/` (mode 0700): a credentials file (0600) with your device token, and one small marker file per registered session. Nothing else. |
-| **Network** | POSTs to your AudioChat backend, from `scripts/audiochat.py`. Nowhere else. |
-| **When it's off** | Until you run `/audiochat-login`, the plugin is inert. Until you run `/audiochat-connect` in a session, that session sends nothing. |
+| **On disk** | `~/.audiochatty/` (mode 0700): a credentials file (0600) with your device token, and one small marker file per registered session. Nothing else. |
+| **Network** | POSTs to your audiochatty backend, from `scripts/audiochat.py`. Nowhere else. |
+| **When it's off** | Until you run `/audiochatty-login`, the plugin is inert. Until you run `/audiochatty-connect` in a session, that session sends nothing. |
 
 ---
 
@@ -29,27 +28,27 @@ below is in this repo, in the files it names.
 
 ```bash
 claude plugin marketplace add tmshapland/audiochatty-plugin
-claude plugin install audiochat@audiochatty
+claude plugin install audiochatty@audiochatty
 ```
 
 Then, once per machine:
 
 ```
-> /audiochat-login
+> /audiochatty-login
 
-  Open https://audiochat.app/link and enter this code:
+  Open https://audiochatty.app/link and enter this code:
 
         WXYZ-1234
 
   It expires in 10 minutes.
-  Once you've entered it, run /audiochat-login again to finish.
+  Once you've entered it, run /audiochatty-login again to finish.
 ```
 
-Open AudioChat in a browser — you're already signed in — go to **Settings → Link a coding
-agent**, and type the code. Then run `/audiochat-login` again:
+Open audiochatty in a browser — you're already signed in — go to **Settings → Link a coding
+agent**, and type the code. Then run `/audiochatty-login` again:
 
 ```
-> /audiochat-login
+> /audiochatty-login
   Linked to Mike's Workspace as Mike.
 ```
 
@@ -66,8 +65,8 @@ command here accepts one as an argument.**
 ## Use
 
 ```
-> /audiochat-connect billing-refactor
-  This session is now "billing-refactor" in AudioChat.
+> /audiochatty-connect billing-refactor
+  This session is now "billing-refactor" in audiochatty.
 ```
 
 That's it. Work normally — the terminal looks no different — and each completed turn shows
@@ -75,18 +74,18 @@ up in your inbox under that name.
 
 | Command | What it does |
 | --- | --- |
-| `/audiochat-login` | Pair this machine. Once per machine. |
-| `/audiochat-connect [name]` | Register *this* session. The name defaults to the folder name. |
-| `/audiochat-status` | Is this machine paired, is this session registered, under what name. Entirely local — no network call. |
-| `/audiochat-disconnect` | Stop sending this session. The machine stays paired. |
+| `/audiochatty-login` | Pair this machine. Once per machine. |
+| `/audiochatty-connect [name]` | Register *this* session. The name defaults to the folder name. |
+| `/audiochatty-status` | Is this machine paired, is this session registered, under what name. Entirely local — no network call. |
+| `/audiochatty-disconnect` | Stop sending this session. The machine stays paired. |
 
 Every other terminal you have open does nothing at all: the `Stop` hook is global, so it
 runs everywhere, looks for a marker file for that session, finds none, and exits.
 
-To turn everything off: `claude plugin disable audiochat`. To remove it:
-`claude plugin uninstall audiochat` and `rm -rf ~/.audiochat`. To kill a machine you no
+To turn everything off: `claude plugin disable audiochatty`. To remove it:
+`claude plugin uninstall audiochatty` and `rm -rf ~/.audiochatty`. To kill a machine you no
 longer have — a stolen laptop, an old work machine — revoke its token from **Settings →
-Linked devices** in AudioChat; the next thing it sends gets a 401.
+Linked devices** in audiochatty; the next thing it sends gets a 401.
 
 ---
 
@@ -131,37 +130,37 @@ terminal.
 Start here:
 
 ```
-> /audiochat-status
+> /audiochatty-status
 ```
 
 Then, in order of likelihood:
 
-- **The session was never registered.** `/audiochat-connect` is per session, not per
+- **The session was never registered.** `/audiochatty-connect` is per session, not per
   machine, and a new terminal is a new session.
 - **The backend is asleep or down.** Turns are dropped silently — that is deliberate, since
   a hook that waits on the network is a hook you feel on every turn. After one failure the
   plugin skips the network entirely for 60 seconds rather than paying the timeout again.
   Nothing is retried; a turn that couldn't be delivered is gone.
-- **The device was revoked.** Everything gets a 401 and stays silent. Run `/audiochat-login`
+- **The device was revoked.** Everything gets a 401 and stays silent. Run `/audiochatty-login`
   to pair again.
 
 To see what the hook is actually deciding:
 
 ```bash
 echo '{"session_id":"<your-session-id>","last_assistant_message":"test"}' \
-  | AUDIOCHAT_DEBUG=1 python3 ~/.claude/plugins/.../scripts/stop_hook.py
+  | AUDIOCHATTY_DEBUG=1 python3 ~/.claude/plugins/.../scripts/stop_hook.py
 ```
 
-`AUDIOCHAT_DEBUG=1` puts one line on stderr per hook run and changes nothing else.
+`AUDIOCHATTY_DEBUG=1` puts one line on stderr per hook run and changes nothing else.
 
 ### Pointing at a different backend
 
 ```bash
-AUDIOCHAT_BACKEND_URL=http://localhost:8000 python3 scripts/audiochat.py login
+AUDIOCHATTY_BACKEND_URL=http://localhost:8000 python3 scripts/audiochat.py login
 ```
 
 `--backend-url` does the same for one command. Once paired, the URL you paired against is
-remembered in `~/.audiochat/credentials.json`, because a device token is only valid at the
+remembered in `~/.audiochatty/credentials.json`, because a device token is only valid at the
 backend that minted it.
 
 ---
@@ -174,7 +173,7 @@ claude plugin validate .                  # manifests
 ```
 
 The tests run every script as a subprocess against a stub HTTP server, with
-`AUDIOCHAT_HOME` pointed at a temp directory — so they're safe to run on a machine that is
+`AUDIOCHATTY_HOME` pointed at a temp directory — so they're safe to run on a machine that is
 already paired, and they assert on what was actually sent over the wire.
 
 Two things worth knowing if you change this code:
@@ -184,7 +183,7 @@ Two things worth knowing if you change this code:
   reason, and there's a test that fails if an unreachable backend costs more than one
   timeout.
 - **A session name containing a double quote won't survive** the shell line in
-  `commands/audiochat-connect.md`, since `$ARGUMENTS` is substituted as text. Use plain
+  `commands/audiochatty-connect.md`, since `$ARGUMENTS` is substituted as text. Use plain
   names.
 
 ## License

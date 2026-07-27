@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The `Stop` hook — one completed turn becomes one AudioChat message.
+"""The `Stop` hook — one completed turn becomes one audiochatty message.
 
 `coding_agent_build_plan.md` Phase 5 · `coding_agent_summary_plan.md` §4.1, §8.
 
@@ -16,7 +16,7 @@ Two rules govern everything in this file, and both come from the plan's sharp ed
    circuit breaker in `audiochat.py`). This hook has no way to report a problem that
    would not also be a problem: the user is mid-conversation.
 
-It therefore always exits 0, always silently. `AUDIOCHAT_DEBUG=1` puts a line on stderr,
+It therefore always exits 0, always silently. `AUDIOCHATTY_DEBUG=1` puts a line on stderr,
 which is where anyone debugging this should start.
 """
 
@@ -203,8 +203,8 @@ def _read_hook_input() -> dict:
 
 
 def _debug(message: str) -> None:
-    if os.environ.get("AUDIOCHAT_DEBUG"):
-        print(f"[audiochat] {message}", file=sys.stderr)
+    if os.environ.get("AUDIOCHATTY_DEBUG"):
+        print(f"[audiochatty] {message}", file=sys.stderr)
 
 
 if __name__ == "__main__":

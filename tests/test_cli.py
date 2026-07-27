@@ -1,7 +1,7 @@
 """The four slash commands, driven the way Claude Code drives them.
 
 Every test runs `scripts/audiochat.py` as a subprocess against the stub backend, with
-`AUDIOCHAT_HOME` pointed at a temp directory — so the suite is safe to run on a machine
+`AUDIOCHATTY_HOME` pointed at a temp directory — so the suite is safe to run on a machine
 that is already paired, and what it asserts is what the command actually does rather than
 what an imported function returns.
 """
@@ -36,8 +36,8 @@ class CliTestCase(unittest.TestCase):
 
     def run_cli(self, *args: str, backend: str | None = None) -> subprocess.CompletedProcess:
         env = dict(os.environ)
-        env["AUDIOCHAT_HOME"] = str(self.home)
-        env["AUDIOCHAT_BACKEND_URL"] = backend if backend is not None else self.backend.url
+        env["AUDIOCHATTY_HOME"] = str(self.home)
+        env["AUDIOCHATTY_BACKEND_URL"] = backend if backend is not None else self.backend.url
         env.pop("CLAUDE_CODE_SESSION_ID", None)
         return subprocess.run(
             [sys.executable, str(CLI), *args],
@@ -155,7 +155,7 @@ class TestLogin(CliTestCase):
     def test_an_unreachable_backend_does_not_traceback(self):
         result = self.run_cli("login", backend="http://127.0.0.1:1")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Could not reach AudioChat", result.stdout)
+        self.assertIn("Could not reach audiochatty", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_the_hostname_rides_along_as_the_label(self):
@@ -180,7 +180,7 @@ class TestConnect(CliTestCase):
         result = self.run_cli("connect", "billing-refactor", "--session-id", "sess-1")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('"billing-refactor" in AudioChat', result.stdout)
+        self.assertIn('"billing-refactor" in audiochatty', result.stdout)
 
         request = self.backend.last_request("/agent/session")
         self.assertEqual(request["authorization"], "Bearer stub-device-token")
@@ -197,7 +197,7 @@ class TestConnect(CliTestCase):
         self.assertEqual(self.backend.last_request("/agent/session")["body"]["name"], "my-repo")
 
     def test_an_empty_argument_is_not_a_name(self):
-        """`/audiochat-connect` with no argument expands to an empty string, which must
+        """`/audiochatty-connect` with no argument expands to an empty string, which must
         fall through to the folder default rather than being sent as the name."""
         self.pair()
         self.run_cli("connect", "", "--session-id", "sess-1", "--cwd", "/tmp/my-repo")
@@ -208,8 +208,8 @@ class TestConnect(CliTestCase):
         that ever stops resolving, the exported `CLAUDE_CODE_SESSION_ID` still answers."""
         self.pair()
         env = dict(os.environ)
-        env["AUDIOCHAT_HOME"] = str(self.home)
-        env["AUDIOCHAT_BACKEND_URL"] = self.backend.url
+        env["AUDIOCHATTY_HOME"] = str(self.home)
+        env["AUDIOCHATTY_BACKEND_URL"] = self.backend.url
         env["CLAUDE_CODE_SESSION_ID"] = "sess-from-env"
         subprocess.run(
             [sys.executable, str(CLI), "connect", "--session-id", ""],
@@ -223,7 +223,7 @@ class TestConnect(CliTestCase):
     def test_an_unpaired_machine_is_told_to_log_in(self):
         result = self.run_cli("connect", "x", "--session-id", "sess-1")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("/audiochat-login", result.stdout)
+        self.assertIn("/audiochatty-login", result.stdout)
         self.assertEqual(self.backend.requests_to("/agent/session"), [])
 
     def test_a_revoked_token_says_so_and_writes_no_marker(self):

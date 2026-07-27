@@ -59,8 +59,8 @@ class HookTestCase(unittest.TestCase):
     def run_hook(self, script: Path, payload: dict, backend: str | None = None,
                  timeout: float = 60) -> subprocess.CompletedProcess:
         env = dict(os.environ)
-        env["AUDIOCHAT_HOME"] = str(self.home)
-        env["AUDIOCHAT_BACKEND_URL"] = backend if backend is not None else self.backend.url
+        env["AUDIOCHATTY_HOME"] = str(self.home)
+        env["AUDIOCHATTY_BACKEND_URL"] = backend if backend is not None else self.backend.url
         return subprocess.run(
             [sys.executable, str(script)],
             input=json.dumps(payload),
@@ -145,8 +145,8 @@ class TestStopHookMarkerCheck(HookTestCase):
                 result = subprocess.run(
                     [sys.executable, str(STOP)],
                     input=raw,
-                    env={**os.environ, "AUDIOCHAT_HOME": str(self.home),
-                         "AUDIOCHAT_BACKEND_URL": self.backend.url},
+                    env={**os.environ, "AUDIOCHATTY_HOME": str(self.home),
+                         "AUDIOCHATTY_BACKEND_URL": self.backend.url},
                     capture_output=True, text=True, timeout=30,
                 )
                 self.assertEqual(result.returncode, 0)
@@ -397,7 +397,7 @@ class TestSessionEndReasons(HookTestCase):
 
     def test_a_failed_end_still_removes_the_marker(self):
         """The session is over either way. A marker left behind is a marker that can
-        never fire, but it would keep showing up in /audiochat-status."""
+        never fire, but it would keep showing up in /audiochatty-status."""
         self.register("sess-1")
         result = self.run_hook(SESSION_END, self.end_payload("logout"),
                                backend="http://127.0.0.1:1")
@@ -410,8 +410,8 @@ class TestSessionEndReasons(HookTestCase):
                 result = subprocess.run(
                     [sys.executable, str(SESSION_END)],
                     input=raw,
-                    env={**os.environ, "AUDIOCHAT_HOME": str(self.home),
-                         "AUDIOCHAT_BACKEND_URL": self.backend.url},
+                    env={**os.environ, "AUDIOCHATTY_HOME": str(self.home),
+                         "AUDIOCHATTY_BACKEND_URL": self.backend.url},
                     capture_output=True, text=True, timeout=30,
                 )
                 self.assertEqual(result.returncode, 0)

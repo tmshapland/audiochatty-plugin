@@ -1,5 +1,5 @@
 {
-  "description": "AudioChat ingest. Stop posts a completed turn for sessions registered with /audiochat-connect; SessionEnd retires a registration, but only when the session has really ended. Both exit silently and never block the terminal.",
+  "description": "audiochatty ingest. Stop posts a completed turn for sessions registered with /audiochatty-connect; SessionEnd retires a registration, but only when the session has really ended. Both exit silently and never block the terminal.",
   "hooks": {
     "Stop": [
       {

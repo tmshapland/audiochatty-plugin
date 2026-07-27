@@ -1,10 +1,10 @@
 ---
-description: Show whether this machine and this session are connected to AudioChat
+description: Show whether this machine and this session are connected to audiochatty
 disable-model-invocation: true
 allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/audiochat.py" *)
 ---
 
-# AudioChat status
+# audiochatty status
 
 ```!
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/audiochat.py" status --session-id "${CLAUDE_SESSION_ID}"

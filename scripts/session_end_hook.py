@@ -93,8 +93,8 @@ def _read_hook_input() -> dict:
 
 
 def _debug(message: str) -> None:
-    if os.environ.get("AUDIOCHAT_DEBUG"):
-        print(f"[audiochat] {message}", file=sys.stderr)
+    if os.environ.get("AUDIOCHATTY_DEBUG"):
+        print(f"[audiochatty] {message}", file=sys.stderr)
 
 
 if __name__ == "__main__":
