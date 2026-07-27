@@ -49,12 +49,15 @@ class HookTestCase(unittest.TestCase):
             json.dumps({"token": "stub-device-token", "backend_url": self.backend.url})
         )
 
-    def register(self, claude_session_id: str, name: str = "billing-refactor") -> None:
+    def register(self, claude_session_id: str, name: str = "billing-refactor",
+                 skip_next_turn: bool = False) -> None:
         sessions = self.home / "sessions"
         sessions.mkdir(parents=True, exist_ok=True)
-        (sessions / f"{claude_session_id}.json").write_text(
-            json.dumps({"claude_session_id": claude_session_id, "name": name})
-        )
+        marker = {"claude_session_id": claude_session_id, "name": name}
+        if skip_next_turn:
+            # What `connect` actually writes; see TestConnect in test_cli.
+            marker["skip_next_turn"] = True
+        (sessions / f"{claude_session_id}.json").write_text(json.dumps(marker))
 
     def run_hook(self, script: Path, payload: dict, backend: str | None = None,
                  timeout: float = 60) -> subprocess.CompletedProcess:
@@ -128,6 +131,31 @@ class TestStopHookMarkerCheck(HookTestCase):
         result = self.run_hook(STOP, self.stop_payload())
         self.assertEqual(result.returncode, 0)
         self.assertEqual(self.backend.requests_to("/agent/turn"), [])
+
+    def test_the_registration_turn_itself_is_not_sent(self):
+        """`/audiochatty-connect` registers during preprocessing, so the Stop hook at the
+        end of that same turn sees a marker and would post "this session is now X in
+        audiochatty" as the session's first message. The user just watched it register."""
+        self.register("sess-1", skip_next_turn=True)
+        result = self.run_hook(STOP, self.stop_payload(
+            last_assistant_message='This session is now "billing-refactor" in audiochatty.'
+        ))
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.backend.requests_to("/agent/turn"), [])
+
+    def test_the_turn_after_registration_is_sent(self):
+        """The flag is one-shot. Consuming it must not silence the session."""
+        self.register("sess-1", skip_next_turn=True)
+        self.run_hook(STOP, self.stop_payload())
+        self.run_hook(STOP, self.stop_payload())
+
+        posted = self.backend.requests_to("/agent/turn")
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(
+            posted[0]["body"]["last_assistant_message"],
+            "I finished the refactor and the tests pass.",
+        )
 
     def test_an_empty_turn_is_not_sent(self):
         """A turn with no text and no tool calls would be a 400. Don't make the backend
@@ -315,7 +343,7 @@ class TestTurnPayload(HookTestCase):
         corrupt.write_text("{not json\n" + json.dumps(self.assistant(self.tool_use("Edit"))) + "\n")
         self.assertEqual(stop_hook.tool_calls_from_transcript(str(corrupt)), ["Edit"])
 
-    def test_the_payload_is_exactly_the_four_documented_keys(self):
+    def test_the_payload_is_exactly_the_five_documented_keys(self):
         self.register("sess-1")
         path = self.write_transcript([
             self.user("go"),
@@ -326,9 +354,111 @@ class TestTurnPayload(HookTestCase):
         body = self.backend.last_request("/agent/turn")["body"]
         self.assertEqual(
             set(body),
-            {"claude_session_id", "last_assistant_message", "tool_calls", "stop_reason", "cwd"},
+            {
+                "claude_session_id",
+                "last_assistant_message",
+                "tool_calls",
+                "transcript",
+                "stop_reason",
+                "cwd",
+            },
         )
         self.assertEqual(body["tool_calls"], ["Edit"])
+
+    def test_the_transcript_carries_what_was_asked(self):
+        """The turn's opening prompt. The old four-key payload had nowhere to put it, so
+        `ask_context` could not answer "what did I ask for?" about the agent's own work."""
+        path = self.write_transcript([
+            self.user("first question"),
+            self.assistant({"type": "text", "text": "done"}),
+            self.user("rename the thing"),
+            self.assistant(self.tool_use("Edit", "t1")),
+        ])
+        transcript = stop_hook.transcript_from_rows(stop_hook._turn_rows(path))
+
+        self.assertEqual(transcript[0]["role"], "user")
+        self.assertEqual(transcript[0]["content"][0]["text"], "rename the thing")
+        # Scoped to this turn, exactly as the tool counts are.
+        self.assertNotIn("first question", json.dumps(transcript))
+
+    def test_an_edit_keeps_its_path_and_both_sides_of_the_change(self):
+        """The reason this field exists. "Two edits happened" was answerable before; "to
+        which files, and what changed in them" was not."""
+        edit = {
+            "type": "tool_use",
+            "id": "t1",
+            "name": "Edit",
+            "input": {
+                "file_path": "prompts/compose.md",
+                "old_string": "ask whether there is anything else",
+                "new_string": "if the message has an obvious gap, ask one short question",
+            },
+        }
+        path = self.write_transcript([self.user("go"), self.assistant(edit)])
+        transcript = stop_hook.transcript_from_rows(stop_hook._turn_rows(path))
+
+        block = transcript[1]["content"][0]
+        self.assertEqual(block["type"], "tool_use")
+        self.assertEqual(block["name"], "Edit")
+        self.assertEqual(block["input"]["file_path"], "prompts/compose.md")
+        self.assertIn("anything else", block["input"]["old_string"])
+        self.assertIn("obvious gap", block["input"]["new_string"])
+
+    def test_tool_results_are_kept_so_a_claim_can_be_checked(self):
+        """"Did the tests pass" is answered by the run, not by the agent's account of it."""
+        path = self.write_transcript([
+            self.user("run the tests"),
+            self.assistant(self.tool_use("Bash", "t1")),
+            self.tool_result("t1"),
+        ])
+        transcript = stop_hook.transcript_from_rows(stop_hook._turn_rows(path))
+
+        results = [b for m in transcript for b in m["content"] if b["type"] == "tool_result"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["content"], "ok")
+
+    def test_subagent_traffic_is_kept_but_flagged(self):
+        """The counts exclude sidechain rows so they read as the main session's work; the
+        transcript keeps them, because a subagent's work is still what happened."""
+        path = self.write_transcript([
+            self.user("go"),
+            dict(self.assistant(self.tool_use("Task", "t1")), isSidechain=False),
+            dict(self.assistant(self.tool_use("Grep", "t2")), isSidechain=True),
+        ])
+        rows = stop_hook._turn_rows(path)
+
+        self.assertEqual(stop_hook.tool_calls_from_rows(rows), ["Task"])
+        transcript = stop_hook.transcript_from_rows(rows)
+        self.assertTrue(transcript[-1]["sidechain"])
+        self.assertEqual(transcript[-1]["content"][0]["name"], "Grep")
+
+    def test_one_enormous_block_is_capped_without_costing_the_turn(self):
+        """A 40 MB `cat` trims to its cap; everything around it survives intact."""
+        huge = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x" * 80_000}],
+            },
+        }
+        path = self.write_transcript([
+            self.user("go"),
+            self.assistant(self.tool_use("Bash", "t1")),
+            huge,
+            self.assistant({"type": "text", "text": "finished"}),
+        ])
+        transcript = stop_hook.transcript_from_rows(stop_hook._turn_rows(path))
+
+        result = transcript[2]["content"][0]["content"]
+        self.assertLess(len(result), 80_000)
+        self.assertTrue(result.endswith(stop_hook.TRUNCATION_MARKER))
+        self.assertEqual(transcript[-1]["content"][0]["text"], "finished")
+
+    def test_a_missing_transcript_still_sends_the_turn(self):
+        """Same rule the tool list follows: a turn is worth delivering without it."""
+        for path in (None, "", "/nonexistent/transcript.jsonl"):
+            with self.subTest(path=path):
+                self.assertEqual(stop_hook.transcript_from_rows(stop_hook._turn_rows(path)), [])
 
     def test_nothing_from_the_hook_input_leaks_into_the_payload(self):
         """`transcript_path` and `permission_mode` are on the way in and must not be on

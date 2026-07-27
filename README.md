@@ -70,7 +70,8 @@ command here accepts one as an argument.**
 ```
 
 That's it. Work normally — the terminal looks no different — and each completed turn shows
-up in your inbox under that name.
+up in your inbox under that name. The registration turn itself is not one of them: you
+just watched it happen, so it isn't also sent to you as a message.
 
 | Command | What it does |
 | --- | --- |

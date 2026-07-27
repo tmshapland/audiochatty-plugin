@@ -191,6 +191,14 @@ class TestConnect(CliTestCase):
         self.assertEqual(marker["name"], "billing-refactor")
         self.assertEqual(marker["session_id"], "33333333-3333-3333-3333-333333333333")
 
+    def test_the_marker_tells_the_stop_hook_to_skip_this_turn(self):
+        """The turn that registers the session is the turn that reports the registration,
+        and the user is watching it happen. The other half of this is in test_hooks."""
+        self.pair()
+        self.run_cli("connect", "billing-refactor", "--session-id", "sess-1")
+        marker = json.loads((self.home / "sessions" / "sess-1.json").read_text())
+        self.assertTrue(marker["skip_next_turn"])
+
     def test_the_name_defaults_to_the_folder(self):
         self.pair()
         self.run_cli("connect", "--session-id", "sess-1", "--cwd", "/tmp/my-repo")

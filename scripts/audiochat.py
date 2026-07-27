@@ -30,6 +30,7 @@ and useless without a signed-in browser.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import socket
@@ -47,7 +48,24 @@ DEFAULT_BACKEND_URL = "https://audiochat-backend.onrender.com"
 # Interactive commands can afford to wait; a person is watching.
 CLI_TIMEOUT = 10.0
 # The hook path cannot. See `post_turn` and the circuit breaker below.
-HOOK_TIMEOUT = 2.5
+#
+# Raised from 2.5s when the turn payload grew to carry the full transcript, but only to
+# 4.0 — and the gap between those two numbers is the whole trade. A bigger body wants a
+# longer timeout; the plan's hard requirement (§8, and rule 2 in `stop_hook.py`) is that
+# a backend which is down or asleep never makes the terminal wait, and *that* wins. The
+# tests hold the line at six seconds wall-clock for a hook against a dead backend, which
+# is the number this has to fit under, not the body size.
+#
+# It fits comfortably because gzip did the work instead: a typical turn is ~16 KB on the
+# wire and the largest measured in this repo is 48 KB, where the cost is the handshake
+# and the round trip, not the bytes. A turn too large to push through this is lost rather
+# than delivered late — the right way round, since the alternative is a terminal that
+# hangs after every prompt.
+HOOK_TIMEOUT = 4.0
+
+# Request bodies at least this large are gzipped. Below it the compression is not worth
+# the header: a session registration is a few hundred bytes.
+GZIP_MIN_BYTES = 4_096
 
 # How long `login` keeps polling in one invocation before handing the terminal back.
 # Bounded on purpose: a slash command that does not return is a slash command that has
@@ -189,11 +207,21 @@ def post(
 
     A 204 (which `/agent/session/end` returns for a session the backend has never heard
     of) decodes as `{}` rather than failing — an empty body is a valid answer here.
+
+    Bodies over `GZIP_MIN_BYTES` are compressed. That is here for `/agent/turn`, which
+    carries a whole turn's transcript: real turns compress to about a fifth, which is the
+    difference between a hook that finishes inside its timeout and one that loses turns
+    on a slow uplink. The backend decompresses on the way in (`app/__init__.py`).
     """
     url = f"{base_url or backend_url()}{path}"
     data = json.dumps(body).encode("utf-8")
+    compressed = len(data) >= GZIP_MIN_BYTES
+    if compressed:
+        data = gzip.compress(data, 6)
     request = urllib.request.Request(url, data=data, method="POST")
     request.add_header("Content-Type", "application/json")
+    if compressed:
+        request.add_header("Content-Encoding", "gzip")
     request.add_header("User-Agent", USER_AGENT)
     if token:
         request.add_header("Authorization", f"Bearer {token}")
@@ -281,6 +309,30 @@ def load_marker(claude_session_id: str) -> dict:
     if not claude_session_id:
         return {}
     return read_json(marker_path(claude_session_id))
+
+
+def consume_skip_next_turn(claude_session_id: str, marker: dict) -> bool:
+    """One-shot: True if this turn is the `/audiochatty-connect` turn itself.
+
+    `connect` writes its marker during the slash command's `` !`…` `` preprocessing, so
+    the session is already registered by the time that same turn ends — and the turn's
+    only content is the model relaying "this session is now X in audiochatty". Delivering
+    that as the first message tells the recipient something they just did themselves, in
+    the voice of a session that has not done any work yet.
+
+    So the flag is set at registration and cleared here, by the first Stop hook that sees
+    it. A failed clear leaves the flag set and costs one further turn, which is the safe
+    direction to fail in: the cost of a dropped turn is one missing blurb, the cost of a
+    spurious one is a message the user did not want.
+    """
+    if not marker.get("skip_next_turn"):
+        return False
+    remaining = {key: value for key, value in marker.items() if key != "skip_next_turn"}
+    try:
+        write_private_json(marker_path(claude_session_id), remaining)
+    except OSError:
+        pass
+    return True
 
 
 # -- login -----------------------------------------------------------------------------
@@ -518,6 +570,10 @@ def cmd_connect(args: argparse.Namespace) -> int:
             "name": registered_name,
             "repo_path": repo_path,
             "registered_at": _now_iso(),
+            # This very turn ends with the model relaying the line printed below, and the
+            # marker it would be checked against already exists. `consume_skip_next_turn`
+            # spends this on that turn so registration itself is never a message.
+            "skip_next_turn": True,
         },
     )
     reset_breaker()
