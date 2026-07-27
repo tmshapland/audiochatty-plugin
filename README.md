@@ -36,7 +36,7 @@ Then, once per machine:
 ```
 > /audiochatty-login
 
-  Open https://audiochatty.app/link and enter this code:
+  Open https://audiochatty.com/link and enter this code:
 
         WXYZ-1234
 
