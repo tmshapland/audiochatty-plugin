@@ -1,0 +1,17 @@
+{
+  "name": "audiochatty",
+  "description": "The AudioChat plugin for Claude Code.",
+  "owner": {
+    "name": "Tom Shapland",
+    "url": "https://github.com/tmshapland"
+  },
+  "plugins": [
+    {
+      "name": "audiochat",
+      "source": "./",
+      "description": "Turn a Claude Code session into a contact in AudioChat.",
+      "category": "productivity",
+      "license": "MIT"
+    }
+  ]
+}

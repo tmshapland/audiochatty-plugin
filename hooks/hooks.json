@@ -1,0 +1,29 @@
+{
+  "description": "AudioChat ingest. Stop posts a completed turn for sessions registered with /audiochat-connect; SessionEnd retires a registration, but only when the session has really ended. Both exit silently and never block the terminal.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/stop_hook.py"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session_end_hook.py"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
