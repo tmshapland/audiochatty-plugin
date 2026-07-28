@@ -796,6 +796,11 @@ async function handleBind(request: Request): Promise<Response> {
     return jsonResponse(409, {
       error: 'already_bound',
       claude_session_id: binding.claudeSessionId,
+      // Always false here — the same session takes the rebind path below — but stated
+      // rather than implied, because the caller's two cases ("this is mine, refresh it"
+      // and "this is somebody else's") are the whole difference and it should not have to
+      // infer one from a status code.
+      same_session: false,
       verified,
     })
   }

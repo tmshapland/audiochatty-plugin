@@ -9,7 +9,7 @@
     {
       "name": "audiochatty",
       "source": "./",
-      "description": "Turn a Claude Code session into a contact in audiochatty.",
+      "description": "Hear what a Claude Code session did, and tell it what to do next, by voice.",
       "category": "productivity",
       "license": "MIT"
     }

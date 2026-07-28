@@ -4,6 +4,16 @@ Every test runs `scripts/audiochat.py` as a subprocess against the stub backend,
 `AUDIOCHATTY_HOME` pointed at a temp directory — so the suite is safe to run on a machine
 that is already paired, and what it asserts is what the command actually does rather than
 what an imported function returns.
+
+`channel_return_path_plan.md` Phase 4 added the return path to `connect`, and with it two
+fixtures below. Both exist because the thing being tested is a *correlation* between three
+processes, and faking it at the wrong layer would prove nothing:
+
+- **`FakeClaude`** is a real process carrying a real command line, because the check it
+  stands in for reads `ps` output. A stub that returned "yes, the flag is there" would test
+  the caller and not the parser, and the parser is where the product breaks.
+- **`FakeChannel`** is a real HTTP server on a real loopback port with a real rendezvous
+  file, because `connect`'s job is to find one of those and POST to it.
 """
 
 from __future__ import annotations
@@ -14,7 +24,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,8 +36,144 @@ from stub_backend import StubBackend  # noqa: E402
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 CLI = SCRIPTS / "audiochat.py"
 
+LAUNCH_FLAG = "--dangerously-load-development-channels"
+LAUNCH_TARGET = "plugin:audiochatty@audiochatty"
+
+
+class FakeClaude:
+    """A live process standing in for `claude`, with a command line we choose.
+
+    `cmd_connect` decides whether this session's channel events are honoured by reading the
+    `claude` process's argv, so the only honest fixture for that is a process whose argv
+    really does or doesn't carry the flag. It sleeps rather than doing anything, and the
+    tests point `CLAUDE_PID` at it.
+    """
+
+    def __init__(self, *, flag: bool = True, target: str = LAUNCH_TARGET):
+        args = [sys.executable, "-c", "import time; time.sleep(120)"]
+        if flag:
+            args += [LAUNCH_FLAG, target]
+        self.proc = subprocess.Popen(
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+    @property
+    def pid(self) -> int:
+        return self.proc.pid
+
+    def stop(self) -> None:
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
+
+class FakeChannel:
+    """A rendezvous file plus a loopback server answering `/bind` and `/unbind`.
+
+    The rendezvous is written the way `channel/server.ts` writes it, including the
+    `claude_env.CLAUDE_PID` that ties it to a `FakeClaude` — that is one of the three
+    signals `find_channel` matches on, and the one that doesn't depend on this test
+    process's own ancestry.
+    """
+
+    def __init__(self, home: Path, claude_pid: int, *, bound_to: str | None = None,
+                 pid: int | None = None):
+        self.claude_pid = claude_pid
+        self.requests: list[dict] = []
+        self._status = 200
+        self._body: dict = {"status": "bound"}
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _channel_handler(self))
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+        self.home = home
+        # `read_channels` requires the pid to be alive and the file to be `<pid>.json`.
+        # This process and its parent are the two most convenient live pids there are, and
+        # two of them is what the ambiguity test needs.
+        self.pid = pid if pid is not None else os.getpid()
+        self.path = home / "channels" / f"{self.pid}.json"
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.write(bound_to=bound_to)
+
+    @property
+    def port(self) -> int:
+        return self._server.server_address[1]
+
+    def write(self, *, bound_to: str | None = None, verified: bool = False) -> None:
+        self.path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "pid": self.pid,
+                    "ppid": os.getppid(),
+                    "port": self.port,
+                    "started_at": "2026-07-28T10:00:00Z",
+                    "ancestry": [{"pid": self.pid, "ppid": os.getppid(), "comm": "bun"}],
+                    "claude_env": {"CLAUDE_PID": str(self.claude_pid)},
+                    "bound": bool(bound_to),
+                    "verified": verified,
+                    "claude_session_id": bound_to,
+                    "agent_session_id": None,
+                    "session_name": None,
+                    "backend_url": None,
+                    "bound_at": None,
+                    "verified_at": None,
+                }
+            )
+        )
+
+    def retarget(self, claude_pid: int) -> None:
+        """Point this channel at a different `claude`. Tests about the launch flag need a
+        channel that genuinely belongs to the process whose command line they are asking
+        about — otherwise `connect` refuses for the *other* reason and the test passes
+        without exercising anything."""
+        self.claude_pid = claude_pid
+        self.write()
+
+    def reply(self, status: int, body: dict) -> None:
+        self._status, self._body = status, body
+
+    def requests_to(self, path: str) -> list[dict]:
+        return [r for r in self.requests if r["path"] == path]
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+def _channel_handler(channel: FakeChannel):
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b""
+            try:
+                body = json.loads(raw.decode("utf-8")) if raw else {}
+            except ValueError:
+                body = {}
+            channel.requests.append({"path": self.path, "body": body})
+            payload = json.dumps(channel._body).encode("utf-8")
+            self.send_response(channel._status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args) -> None:
+            """Silence."""
+
+    return Handler
+
 
 class CliTestCase(unittest.TestCase):
+    """Every test gets a paired-shaped world: a stub backend, a `claude` carrying the
+    channel flag, and one channel waiting to be bound. Tests about the refusals take those
+    away deliberately."""
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.home = Path(self._tmp.name)
@@ -34,11 +182,20 @@ class CliTestCase(unittest.TestCase):
         self.backend.__enter__()
         self.addCleanup(lambda: self.backend.__exit__(None, None, None))
 
-    def run_cli(self, *args: str, backend: str | None = None) -> subprocess.CompletedProcess:
+        self.claude = FakeClaude(flag=True)
+        self.addCleanup(self.claude.stop)
+        self.channel = FakeChannel(self.home, self.claude.pid)
+        self.addCleanup(self.channel.stop)
+
+    def run_cli(self, *args: str, backend: str | None = None,
+                claude_pid: int | None = None) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["AUDIOCHATTY_HOME"] = str(self.home)
         env["AUDIOCHATTY_BACKEND_URL"] = backend if backend is not None else self.backend.url
         env.pop("CLAUDE_CODE_SESSION_ID", None)
+        # Without this the ancestry walk would find whatever `claude` this suite happens to
+        # be running under, which is a different answer on a laptop than in CI.
+        env["CLAUDE_PID"] = str(self.claude.pid if claude_pid is None else claude_pid)
         return subprocess.run(
             [sys.executable, str(CLI), *args],
             env=env,
@@ -46,6 +203,9 @@ class CliTestCase(unittest.TestCase):
             text=True,
             timeout=60,
         )
+
+    def remove_channel(self) -> None:
+        self.channel.path.unlink(missing_ok=True)
 
     def credentials(self) -> dict:
         path = self.home / "credentials.json"
@@ -163,6 +323,15 @@ class TestLogin(CliTestCase):
         body = self.backend.last_request("/device/code")["body"]
         self.assertTrue(body["label"], "the approving browser needs something to show")
 
+    def test_pairing_ends_by_naming_the_launch_command(self):
+        """R12. Four surfaces describe this setup and this is the only one we fully control
+        and the only one the user is looking at when the step is due."""
+        self.run_cli("login")
+        result = self.run_cli("login", "--wait", "0")
+
+        self.assertIn(f"claude {LAUNCH_FLAG} {LAUNCH_TARGET}", result.stdout)
+        self.assertIn("tell that session", result.stdout)
+
     def test_reset_discards_a_pending_code(self):
         self.run_cli("login")
         first = json.loads((self.home / "pending.json").read_text())["user_code"]
@@ -219,6 +388,7 @@ class TestConnect(CliTestCase):
         env["AUDIOCHATTY_HOME"] = str(self.home)
         env["AUDIOCHATTY_BACKEND_URL"] = self.backend.url
         env["CLAUDE_CODE_SESSION_ID"] = "sess-from-env"
+        env["CLAUDE_PID"] = str(self.claude.pid)
         subprocess.run(
             [sys.executable, str(CLI), "connect", "--session-id", ""],
             env=env, capture_output=True, text=True, timeout=60,
@@ -260,6 +430,187 @@ class TestConnect(CliTestCase):
         self.assertTrue(list((self.home / "sessions").glob("*.json")))
 
 
+# -- connect and the return path (R1, R4) -----------------------------------------------
+
+
+class TestConnectBindsTheChannel(CliTestCase):
+    def test_the_channel_is_bound_with_the_registration_it_just_got(self):
+        """The whole of R4 in one assertion: the id `/bind` receives is the one the backend
+        answered `/agent/session` with, so the channel polls for the right session."""
+        self.pair()
+        result = self.run_cli("connect", "billing-refactor", "--session-id", "sess-1")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        bind = self.channel.requests_to("/bind")
+        self.assertEqual(len(bind), 1, "exactly one bind per connect")
+        self.assertEqual(
+            bind[0]["body"]["agent_session_id"], "33333333-3333-3333-3333-333333333333"
+        )
+        self.assertEqual(bind[0]["body"]["claude_session_id"], "sess-1")
+        self.assertEqual(bind[0]["body"]["backend_url"], self.backend.url)
+        self.assertEqual(bind[0]["body"]["session_name"], "billing-refactor")
+
+    def test_the_bind_carries_this_machines_token(self):
+        """`/bind` refuses a token that doesn't match `credentials.json`, so a channel
+        cannot be pointed at a session by some other process on the machine."""
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+        self.assertEqual(
+            self.channel.requests_to("/bind")[0]["body"]["token"], "stub-device-token"
+        )
+
+    def test_the_marker_records_which_channel_was_bound(self):
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+        marker = json.loads((self.home / "sessions" / "sess-1.json").read_text())
+        self.assertEqual(marker["channel_pid"], self.channel.pid)
+        self.assertEqual(marker["channel_port"], self.channel.port)
+
+    def test_a_second_connect_in_the_same_session_rebinds_rather_than_refusing(self):
+        """The channel treats a re-bind of the same session as a refresh (Phase 2's
+        standing obligation). This side has to keep offering it one — the candidate is
+        already `bound`, and a naive "only unbound channels" filter would refuse."""
+        self.pair()
+        self.run_cli("connect", "billing-refactor", "--session-id", "sess-1")
+        self.channel.write(bound_to="sess-1")
+
+        result = self.run_cli("connect", "renamed", "--session-id", "sess-1")
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(len(self.channel.requests_to("/bind")), 2)
+
+    def test_a_channel_bound_to_another_session_is_not_ours(self):
+        """Fifteen terminals, one of them already connected. Its channel belongs to it, and
+        binding it here would put this session's instructions in that terminal."""
+        self.pair()
+        self.channel.write(bound_to="somebody-elses-session")
+
+        result = self.run_cli("connect", "x", "--session-id", "sess-1")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.channel.requests_to("/bind"), [])
+        self.assertEqual(self.backend.requests_to("/agent/session"), [])
+
+
+class TestConnectRefusals(CliTestCase):
+    """R1: a session that can't be talked to isn't registered at all. Each refusal has to
+    happen *before* the registration, or it leaves a live row behind."""
+
+    def test_no_channel_refuses_and_prints_the_relaunch_command(self):
+        self.pair()
+        self.remove_channel()
+
+        result = self.run_cli("connect", "x", "--session-id", "sess-1")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(LAUNCH_FLAG, result.stdout)
+        self.assertIn(LAUNCH_TARGET, result.stdout)
+        self.assertEqual(self.backend.requests_to("/agent/session"), [])
+        self.assertFalse((self.home / "sessions" / "sess-1.json").exists())
+
+    def test_a_session_started_without_the_flag_refuses(self):
+        """The failure this catches is invisible everywhere else: the channel process runs
+        whether or not channels are enabled, so it binds happily and then every event it
+        sends is dropped with no error."""
+        self.pair()
+        unflagged = FakeClaude(flag=False)
+        self.addCleanup(unflagged.stop)
+        self.channel.retarget(unflagged.pid)
+
+        result = self.run_cli("connect", "x", "--session-id", "sess-1",
+                              claude_pid=unflagged.pid)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("without Claude Code's channel flag", result.stdout)
+        self.assertIn(LAUNCH_FLAG, result.stdout)
+        self.assertEqual(self.backend.requests_to("/agent/session"), [])
+        self.assertFalse((self.home / "sessions" / "sess-1.json").exists())
+
+    def test_a_flag_naming_a_different_plugin_does_not_count(self):
+        self.pair()
+        other = FakeClaude(flag=True, target="plugin:telegram@claude-plugins-official")
+        self.addCleanup(other.stop)
+        self.channel.retarget(other.pid)
+
+        result = self.run_cli("connect", "x", "--session-id", "sess-1", claude_pid=other.pid)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("without Claude Code's channel flag", result.stdout)
+        self.assertEqual(self.backend.requests_to("/agent/session"), [])
+
+    def test_the_allowlisted_flag_counts_too(self):
+        """`--channels` is what an allowlisted or org-approved plugin is launched with. It
+        has to pass, or the plugin breaks on the day it stops needing the scary one."""
+        self.pair()
+        approved = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(120)", "--channels", LAUNCH_TARGET],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(approved.wait)
+        self.addCleanup(approved.kill)
+        self.channel.retarget(approved.pid)
+
+        result = self.run_cli("connect", "x", "--session-id", "sess-1", claude_pid=approved.pid)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_an_unreadable_command_line_fails_open(self):
+        """A `ps` that answers nothing must not become a refusal: the cost of failing closed
+        is a plugin that can never register anything, on a platform we haven't seen."""
+        self.pair()
+        dead = FakeClaude(flag=False)
+        pid = dead.pid
+        dead.stop()
+        self.channel.retarget(pid)
+
+        result = self.run_cli("connect", "x", "--session-id", "sess-1", claude_pid=pid)
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(len(self.channel.requests_to("/bind")), 1)
+
+    def test_two_channels_for_one_terminal_is_an_error_not_a_guess(self):
+        second = FakeChannel(self.home, self.claude.pid, pid=os.getppid())
+        self.addCleanup(second.stop)
+        self.pair()
+
+        result = self.run_cli("connect", "x", "--session-id", "sess-1")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("more than one", result.stdout.lower())
+        self.assertEqual(self.backend.requests_to("/agent/session"), [])
+
+    def test_a_channel_that_refuses_the_bind_rolls_the_registration_back(self):
+        """The one path that has to undo something: registration landed, the bind didn't,
+        and R1 says there is no such thing as a half-registered session."""
+        self.pair()
+        self.channel.reply(409, {"error": "already_bound"})
+
+        result = self.run_cli("connect", "x", "--session-id", "sess-1")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse((self.home / "sessions" / "sess-1.json").exists())
+        self.assertEqual(
+            self.backend.last_request("/agent/session/end")["body"]["claude_session_id"],
+            "sess-1",
+        )
+
+    def test_a_dead_channel_process_is_not_a_channel(self):
+        """A rendezvous file outliving its process is how `connect` binds to a corpse. The
+        channel prunes its own on startup; this side must not trust one either."""
+        self.pair()
+        dead_pid = 999_999
+        (self.home / "channels" / f"{dead_pid}.json").write_text(
+            json.dumps({"pid": dead_pid, "port": self.channel.port, "ancestry": [],
+                        "claude_env": {"CLAUDE_PID": str(self.claude.pid)}, "bound": False})
+        )
+        self.remove_channel()
+
+        result = self.run_cli("connect", "x", "--session-id", "sess-1")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.channel.requests_to("/bind"), [])
+
+
 # -- status -----------------------------------------------------------------------------
 
 
@@ -297,6 +648,78 @@ class TestStatus(CliTestCase):
         self.assertEqual(len(self.backend.requests), before)
 
 
+class TestStatusReportsTheChannel(CliTestCase):
+    """This is the command a confused user runs, and R11's failure is the thing it most
+    needs to name. It stays local: the rendezvous file already carries `bound` and
+    `verified`, so there is nothing here to be slow or to be down."""
+
+    def test_a_verified_session_says_it_can_be_talked_to(self):
+        self.pair()
+        self.run_cli("connect", "billing-refactor", "--session-id", "sess-1")
+        self.channel.write(bound_to="sess-1", verified=True)
+
+        result = self.run_cli("status", "--session-id", "sess-1")
+
+        self.assertIn("You can talk to this session from audiochatty", result.stdout)
+
+    def test_an_unverified_binding_names_the_flag_when_that_is_the_cause(self):
+        """Five things land a session in "unverified" and only a process inside it can tell
+        them apart — which is why the inbox points here. Two of them are visible from here,
+        and the missing flag is the one people actually hit."""
+        self.pair()
+        unflagged = FakeClaude(flag=False)
+        self.addCleanup(unflagged.stop)
+        self.channel.retarget(unflagged.pid)
+        self.channel.write(bound_to="sess-1", verified=False)
+        self.channel.claude_pid = unflagged.pid
+
+        result = self.run_cli("status", "--session-id", "sess-1", claude_pid=unflagged.pid)
+
+        self.assertIn("connected but unconfirmed", result.stdout)
+        self.assertIn("started without the channel flag", result.stdout)
+
+    def test_an_unverified_binding_with_the_flag_says_to_finish_a_turn(self):
+        """The handshake can only be answered once this command has returned and the model's
+        turn begins, so "not yet" is the ordinary reading right after connecting."""
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+        self.channel.write(bound_to="sess-1", verified=False)
+
+        result = self.run_cli("status", "--session-id", "sess-1")
+
+        self.assertIn("connected but unconfirmed", result.stdout)
+        self.assertIn("finish a turn", result.stdout)
+
+    def test_a_session_with_no_channel_is_told_how_to_get_one(self):
+        self.pair()
+        self.remove_channel()
+
+        result = self.run_cli("status", "--session-id", "sess-1")
+
+        self.assertIn("No audiochatty channel is running", result.stdout)
+        self.assertIn(LAUNCH_FLAG, result.stdout)
+
+    def test_a_registered_session_whose_channel_restarted_says_to_reconnect(self):
+        """The marker survives a channel process; the binding doesn't. What is left is a
+        session that reads as registered and silently receives nothing."""
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+        self.channel.write()  # a fresh, unbound channel — the old process is gone
+
+        result = self.run_cli("status", "--session-id", "sess-1")
+
+        self.assertIn("isn't connected", result.stdout)
+        self.assertIn("/audiochatty-connect", result.stdout)
+
+    def test_the_channel_report_still_makes_no_network_calls(self):
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+        before = len(self.backend.requests)
+        self.run_cli("status", "--session-id", "sess-1")
+        self.assertEqual(len(self.backend.requests), before)
+        self.assertEqual(self.channel.requests_to("/status"), [])
+
+
 # -- disconnect -------------------------------------------------------------------------
 
 
@@ -321,6 +744,42 @@ class TestDisconnect(CliTestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("wasn't registered", result.stdout)
         self.assertEqual(self.backend.requests_to("/agent/session/end"), [])
+
+    def test_the_channel_is_unbound_as_well(self):
+        """A channel left bound keeps polling for instructions addressed to a session the
+        user has just closed, and would deliver one into this terminal."""
+        self.pair()
+        self.run_cli("connect", "billing-refactor", "--session-id", "sess-1")
+        self.channel.write(bound_to="sess-1")
+
+        self.run_cli("disconnect", "--session-id", "sess-1")
+
+        unbind = self.channel.requests_to("/unbind")
+        self.assertEqual(len(unbind), 1)
+        self.assertEqual(unbind[0]["body"]["token"], "stub-device-token")
+
+    def test_another_sessions_channel_is_left_alone(self):
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+        self.channel.write(bound_to="a-different-session")
+
+        self.run_cli("disconnect", "--session-id", "sess-1")
+
+        self.assertEqual(self.channel.requests_to("/unbind"), [])
+
+    def test_an_unreachable_channel_does_not_stop_the_disconnect(self):
+        """The unbind is best effort by design: a channel that cannot be reached is one that
+        has already exited, which is the same outcome by a different route."""
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+        self.channel.write(bound_to="sess-1")
+        self.channel.stop()
+
+        result = self.run_cli("disconnect", "--session-id", "sess-1")
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Stopped sending", result.stdout)
+        self.assertFalse((self.home / "sessions" / "sess-1.json").exists())
 
     def test_the_marker_goes_even_when_the_backend_is_unreachable(self):
         """Local state first. A failed POST must not leave a hook posting turns for a

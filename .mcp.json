@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "audiochatty": {
+      "command": "bun",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/channel/server.ts"],
+      "env": {
+        "AUDIOCHATTY_HOME": "${AUDIOCHATTY_HOME:-}",
+        "AUDIOCHATTY_DEBUG": "${AUDIOCHATTY_DEBUG:-}"
+      }
+    }
+  }
+}

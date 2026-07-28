@@ -3,7 +3,7 @@
   "name": "audiochatty",
   "displayName": "audiochatty",
   "version": "0.1.0",
-  "description": "Turn a Claude Code session into a contact in audiochatty. Each completed turn is rewritten into a short spoken summary you can listen to, and ask follow-up questions about, from anywhere.",
+  "description": "Talk to a Claude Code session from your phone. Each completed turn becomes a short spoken summary you can listen to from anywhere, and what you say back is delivered into the running session as a prompt.",
   "author": {
     "name": "Tom Shapland",
     "url": "https://github.com/tmshapland"
@@ -11,5 +11,11 @@
   "homepage": "https://github.com/tmshapland/audiochatty-plugin",
   "repository": "https://github.com/tmshapland/audiochatty-plugin",
   "license": "MIT",
-  "keywords": ["audiochatty", "voice", "notifications", "summaries"]
+  "keywords": [
+    "audiochatty",
+    "voice",
+    "channel",
+    "notifications",
+    "summaries"
+  ]
 }

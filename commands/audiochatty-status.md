@@ -10,5 +10,7 @@ allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/audiochat.py" *)
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/audiochat.py" status --session-id "${CLAUDE_SESSION_ID}"
 ```
 
-Relay the above to the user verbatim. It is entirely local — no network call was made and
-nothing was changed.
+Relay the above to the user verbatim, including any command it prints. It is entirely local
+— no network call was made and nothing was changed. This is the command someone runs when
+audiochatty says a session can't be talked to, so the diagnosis it prints is the point of
+it; don't summarise it away.
