@@ -2,8 +2,13 @@
 
 `coding_agent_build_plan.md` Phase 5 asks for tests that run without Claude Code. This is
 the other half of that: tests that run without Flask, without Supabase, and without a
-network. It speaks only the six routes the plugin knows about, and it records every
+network. It speaks only the routes the plugin knows about, and it records every
 request so a test can assert on what was sent rather than only on what came back.
+
+`channel_return_path_plan.md` Phase 3 added the three return-path routes and, with them,
+the first `GET` — so requests are keyed by path *without* the query string, and
+`entry["query"]` carries the parsed parameters. Existing POST assertions are unaffected:
+none of them has a query string to lose.
 
 It deliberately does *not* validate bodies the way the real backend does. The real
 backend's normalisation is tested in `audiochat-backend/tests/test_agent_routes.py`;
@@ -15,6 +20,7 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 
 class StubBackend:
@@ -113,6 +119,11 @@ DEFAULTS: dict[str, tuple[int, dict]] = {
     "/agent/session/end": (200, {"session_id": "33333333-3333-3333-3333-333333333333",
                                  "status": "ended"}),
     "/agent/turn": (202, {"status": "queued", "job_id": "44444444-4444-4444-4444-444444444444"}),
+    # The return path. An empty queue is the ordinary answer here — the channel polls
+    # forever — so the default is an empty list rather than a 404.
+    "/agent/inbound": (200, {"messages": []}),
+    "/agent/inbound/ack": (200, {"message_ids": []}),
+    "/agent/session/verified": (200, {"status": "verified"}),
 }
 
 
@@ -127,17 +138,27 @@ def _make_handler(backend: StubBackend):
                 body = json.loads(raw.decode("utf-8")) if raw else {}
             except ValueError:
                 body = {}
+            self._handle(body)
+
+        def do_GET(self):  # noqa: N802
+            self._handle({})
+
+        def _handle(self, body: dict) -> None:
+            split = urlsplit(self.path)
+            path = split.path
 
             backend.record(
                 {
-                    "path": self.path,
+                    "path": path,
+                    "query": {k: v[0] for k, v in parse_qs(split.query).items()},
                     "body": body,
+                    "method": self.command,
                     "authorization": self.headers.get("Authorization"),
                     "user_agent": self.headers.get("User-Agent"),
                 }
             )
 
-            queued = backend.next_reply(self.path)
+            queued = backend.next_reply(path)
             if queued:
                 if queued["delay"]:
                     import time
@@ -146,7 +167,7 @@ def _make_handler(backend: StubBackend):
                 self._send(queued["status"], queued["body"])
                 return
 
-            status, payload = DEFAULTS.get(self.path, (404, {"error": "not found"}))
+            status, payload = DEFAULTS.get(path, (404, {"error": "not found"}))
             self._send(status, payload)
 
         def _send(self, status: int, payload: dict) -> None:
