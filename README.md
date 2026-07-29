@@ -67,8 +67,8 @@ agent**, and type the code. Then run `/audiochatty-login` again:
 
       claude --dangerously-load-development-channels plugin:audiochatty@audiochatty
 
-  then run /audiochatty-connect there. The flag is what lets you tell that session
-  what to do next from audiochatty; without it you can only listen.
+  then run /audiochatty-connect there. Without the flag, /audiochatty-connect refuses
+  outright — the session sends nothing and receives nothing.
 ```
 
 **Why two runs, and why a code instead of a token.** A slash command's output is

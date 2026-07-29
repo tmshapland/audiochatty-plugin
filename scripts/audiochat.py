@@ -813,12 +813,13 @@ def _login_finish(response: dict, base: str) -> int:
     # user is looking at when the step is actually due. So it carries the command and the
     # reason, not a pointer to somewhere else that carries them.
     print("One more step, and it's per session rather than per machine: audiochatty needs")
-    print("Claude Code's channel flag to talk back to a session. Start Claude Code with:")
+    print("Claude Code's channel flag before a session can be registered at all. Start")
+    print("Claude Code with:")
     print()
     print(f"    {LAUNCH_COMMAND}")
     print()
-    print("then run /audiochatty-connect there. The flag is what lets you tell that session")
-    print("what to do next from audiochatty; without it you can only listen.")
+    print("then run /audiochatty-connect there. Without the flag, /audiochatty-connect")
+    print("refuses outright — the session sends nothing and receives nothing.")
     return 0
 
 
@@ -875,7 +876,7 @@ def cmd_connect(args: argparse.Namespace) -> int:
     if channels_flag_names_us(claude_pid()) is False:
         _print_relaunch(
             "This session was started without Claude Code's channel flag, so audiochatty\n"
-            "can hear it but can't talk back to it. Nothing was registered."
+            "will not connect to it at all — not even to listen. Nothing was registered."
         )
         return 1
 

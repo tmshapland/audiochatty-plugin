@@ -1,0 +1,6 @@
+#!/bin/sh
+# `audiochatty run` — the launcher, so the command in the docs is the command you type.
+#
+# Put this on your PATH or alias it; see wrapper/README.md. It only exists so that
+# `audiochatty run` is literally runnable — all of the program is in __main__.py.
+exec python3 "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/__main__.py" "$@"
