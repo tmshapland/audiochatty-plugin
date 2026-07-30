@@ -28,11 +28,11 @@ below is in this repo, in the files it names.
 | | |
 | --- | --- |
 | **Runtime** | Python 3, standard library only. No pip, no venv, no build step, nothing to install beyond the plugin itself. |
-| **Background processes** | One, and you start it yourself: `audiochatty run`, which is how you launch Claude Code once you want a session you can talk to. It runs for as long as that session does. Until `/audiochatty-connect` binds it, it does nothing at all — no polling, no network. The hooks are still short-lived processes Claude Code spawns, waits on, and discards. |
+| **Background processes** | One, and you start it yourself: `audiochatty run`, which is how you launch Claude Code once you want a session you can talk to. It runs for as long as that session does, and it connects that session itself — on a paired machine it registers and starts polling at launch. On a machine you haven't paired yet it does nothing at all: no polling, no network. The hooks are still short-lived processes Claude Code spawns, waits on, and discards. |
 | **What that process can do** | Type into your Claude Code session, as if you had typed it. That is the whole feature and the whole risk; `wrapper/README.md` spells out the limits. |
-| **On disk** | `~/.audiochatty/` (mode 0700): a credentials file (0600) with your device token, one marker file per registered session, and one rendezvous file (0600) per running wrapper. Nothing else. |
+| **On disk** | `~/.audiochatty/` (mode 0700): a credentials file (0600) with your device token, one marker file per registered session, one tombstone per session you disconnected by hand, and one rendezvous file (0600) per running wrapper. Nothing else. |
 | **Network** | Your audiochatty backend, and nowhere else — POSTs out from `scripts/audiochat.py`, and a poll for anything addressed to this session from `audiochatty run`. Nothing accepts a connection from off this machine. |
-| **When it's off** | Until you run `/audiochatty-login`, the plugin is inert. Until you start a session with `audiochatty run` *and* run `/audiochatty-connect` in it, that session sends nothing and receives nothing. |
+| **When it's off** | Until you run `/audiochatty-login`, the plugin is inert — `audiochatty run` on an unpaired machine makes no network call at all. A session started with plain `claude` sends nothing and receives nothing, ever. |
 | **Platform** | macOS and Linux. The pseudo-terminal `audiochatty run` is built on doesn't exist on Windows. |
 
 ---
@@ -69,10 +69,10 @@ agent**, and type the code. Then run `/audiochatty-login` again:
 
       audiochatty run
 
-  then run /audiochatty-connect there. It's the same Claude Code you already use —
-  same terminal, nothing to load, no warning — with a return path attached. Under
-  plain `claude` there is nothing to tell that session, and /audiochatty-connect
-  refuses outright rather than registering a session you can't reach.
+  That's the whole of it — it connects the session for you, so there's nothing to
+  run afterwards. It's the same Claude Code you already use: same terminal, nothing
+  to load, no warning, with a return path attached. A session started with plain
+  `claude` has no return path, so there is nothing there to tell it what to do.
 
   If `audiochatty` isn't a command on this machine yet, that is one line in your
   shell profile:
@@ -103,23 +103,28 @@ and can't do.
 ## Use
 
 ```
-> audiochatty run
-> /audiochatty-connect billing-refactor
-  This session is now "billing-refactor" in audiochatty.
-  You can hear what it does, and tell it what to do next, from audiochatty.
+$ audiochatty run                      # or: audiochatty run --name billing-refactor
 ```
 
-That's it. Work normally — the terminal looks no different, which is measured rather than
-hoped: about 34 microseconds per keystroke and nothing at all on redraw throughput — and each
-completed turn shows up in your inbox under that name. The registration turn itself is not
-one of them: you just watched it happen, so it isn't also sent to you as a message.
+That's it — one command, and the session shows up in audiochatty under the current folder's
+name. There is no second step and nothing to type into the session.
+
+**It connects silently, on purpose.** The terminal belongs to Claude Code's interface, and a
+line printed into it is a corrupted screen — so the confirmation is the session appearing in
+your inbox. The flip side is that a connect which *fails* (audiochatty unreachable, a revoked
+device) is also invisible: `/audiochatty-status` is where that reason surfaces, and it's the
+first thing to run if a session never shows up.
+
+Work normally — the terminal looks no different, which is measured rather than hoped: about
+34 microseconds per keystroke and nothing at all on redraw throughput — and each completed
+turn shows up in your inbox under that name.
 
 | Command | What it does |
 | --- | --- |
 | `/audiochatty-login` | Pair this machine. Once per machine. |
-| `/audiochatty-connect [name]` | Connect *this* session, both directions. The name defaults to the folder name. Refuses if the session wasn't started with `audiochatty run`. |
+| `/audiochatty-connect [name]` | Rarely needed — sessions connect themselves. Run it to retry a connect that failed, to rename this session, or to reconnect one you disconnected. Refuses if the session wasn't started with `audiochatty run`. |
 | `/audiochatty-status` | Is this machine paired, is this session connected, can it be talked to. Entirely local — no network call. |
-| `/audiochatty-disconnect` | Stop sending and stop receiving. The machine stays paired and the session keeps running. |
+| `/audiochatty-disconnect` | Stop sending and stop receiving. The machine stays paired and the session keeps running, and it stays disconnected until you run `/audiochatty-connect` — nothing automatic brings it back. |
 
 Every other terminal you have open does nothing at all: the `Stop` hook is global, so it
 runs everywhere, looks for a marker file for that session, finds none, and exits. A session
@@ -214,10 +219,14 @@ It answers all of this locally, including which half is broken. Then, in order o
 likelihood:
 
 - **The session was started with `claude`, not `audiochatty run`.** There is nothing that can
-  type into it, so `/audiochatty-connect` refuses outright rather than half-connecting, and
-  prints the command to start again with. This is the common one.
-- **The session was never connected.** `/audiochatty-connect` is per session, not per
-  machine, and a new terminal is a new session.
+  type into it, so nothing connected it — and `/audiochatty-connect` refuses outright rather
+  than half-connecting, printing the command to start again with. This is the common one, and
+  `audiochatty run` is per session: a new terminal needs it again.
+- **The connect failed at launch and said nothing.** It can't say anything — the screen belongs
+  to Claude Code. `/audiochatty-status` names the reason (unreachable backend, revoked device),
+  and `/audiochatty-connect` retries without restarting the session.
+- **The session was disconnected earlier.** It stays that way deliberately, including across a
+  `/clear`. `/audiochatty-connect` is the only thing that brings it back.
 - **An instruction hasn't appeared yet.** Give it 30 seconds — that's the slow end of the
   poll — and check you aren't mid-way through typing a line, which makes the wrapper wait.
 - **The backend is asleep or down.** Turns are dropped silently — that is deliberate, since
@@ -237,7 +246,9 @@ echo '{"session_id":"<your-session-id>","last_assistant_message":"test"}' \
 
 `AUDIOCHATTY_DEBUG=1` puts one line on stderr per hook run and changes nothing else. The
 same variable makes `/audiochatty-connect` explain which wrapper it found and why it accepted
-or refused it, and makes `audiochatty run` log what it polls and types in.
+or refused it, and makes `audiochatty run` narrate its own connect at launch plus what it polls
+and types in. Stderr only, never stdout — for `SessionStart` in particular, stdout would be fed
+to the model as context.
 
 ### Pointing at a different backend
 
@@ -247,8 +258,8 @@ AUDIOCHATTY_BACKEND_URL=http://localhost:8000 python3 scripts/audiochat.py login
 
 `--backend-url` does the same for one command. Once paired, the URL you paired against is
 remembered in `~/.audiochatty/credentials.json`, because a device token is only valid at the
-backend that minted it. The wrapper is handed that same URL when `/audiochatty-connect` binds
-it, so it never needs configuring separately.
+backend that minted it. The wrapper resolves the same URL the same way when it connects itself,
+so it never needs configuring separately.
 
 ---
 

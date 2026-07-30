@@ -77,7 +77,8 @@ class FakeWrapper:
         return self._server.server_address[1]
 
     def write(self, *, bound_to: str | None = None, verified: bool = False,
-              expected_session_id: str | None = "keep", port: int | None = None) -> None:
+              expected_session_id: str | None = "keep", port: int | None = None,
+              connect_error: str | None = None) -> None:
         if expected_session_id != "keep":
             self.expected_session_id = expected_session_id
         stamp = "2026-07-29T10:00:00Z"
@@ -100,6 +101,9 @@ class FakeWrapper:
                     "backend_url": None,
                     "bound_at": stamp if bound_to else None,
                     "verified_at": stamp if verified else None,
+                    # W13. The launch connects silently, so this is where a failure goes.
+                    "connect_error": connect_error,
+                    "connect_error_at": stamp if connect_error else None,
                 }
             )
         )
@@ -315,9 +319,18 @@ class TestLogin(CliTestCase):
         result = self.run_cli("login", "--wait", "0")
 
         self.assertIn(RUN_COMMAND, result.stdout)
-        self.assertIn("/audiochatty-connect", result.stdout)
         # The launch flag is gone, and nothing here may reintroduce it.
         self.assertNotIn("dangerously", result.stdout)
+
+    def test_pairing_does_not_send_anyone_to_a_second_step(self):
+        """W13. This copy told users to run `/audiochatty-connect` after `audiochatty run`
+        for as long as connecting was a separate act. It isn't one — so naming it here would
+        send every new user off to do something that now does nothing."""
+        self.run_cli("login")
+        result = self.run_cli("login", "--wait", "0")
+
+        self.assertNotIn("/audiochatty-connect", result.stdout)
+        self.assertIn("connects the session for you", result.stdout)
 
     def test_pairing_also_shows_how_to_make_the_command_exist(self):
         """👤 chose the bare command on the grounds that developers can run commands — but
@@ -868,6 +881,172 @@ class TestDisconnect(CliTestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("Stopped sending", result.stdout)
         self.assertEqual(self.marker(), {})
+
+
+# -- W13: connect is a repair tool now --------------------------------------------------
+
+
+class TestConnectIsARepairTool(CliTestCase):
+    """Phase 6.5. `audiochatty run` connects its own session, so the three reasons left to
+    run this command by hand are: retry after a failed launch connect, rename, and reconnect
+    after a disconnect. The first case it never had to handle before is the one that is now
+    *likely* — being run against a session that is already connected."""
+
+    def tombstone(self, claude_session_id: str = "sess-1") -> dict:
+        path = self.home / "disconnected" / f"{claude_session_id}.json"
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    def test_an_already_connected_session_is_reported_not_reregistered(self):
+        self.pair()
+        self.run_cli("connect", "billing-refactor", "--session-id", "sess-1")
+        self.wrapper.write(bound_to="sess-1", verified=True)
+        before = len(self.backend.requests_to("/agent/session"))
+
+        result = self.run_cli("connect", "--session-id", "sess-1")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('already connected as "billing-refactor"', result.stdout)
+        self.assertEqual(len(self.backend.requests_to("/agent/session")), before)
+
+    def test_a_name_still_renames_an_already_connected_session(self):
+        """Renaming is one of the three reasons this command survives, so asking for a name
+        has to beat the "already connected, nothing to do" shortcut."""
+        self.pair()
+        self.run_cli("connect", "billing-refactor", "--session-id", "sess-1")
+        self.wrapper.write(bound_to="sess-1", verified=True)
+        # The registered name comes back from the backend, so the stub has to agree for the
+        # rename to be observable end to end rather than only in the request body.
+        self.backend.reply("/agent/session", 200, {"session_id": "s-a", "name": "auth-bug"})
+
+        result = self.run_cli("connect", "auth-bug", "--session-id", "sess-1")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"auth-bug" in audiochatty', result.stdout)
+        self.assertEqual(
+            self.backend.last_request("/agent/session")["body"]["name"], "auth-bug"
+        )
+
+    def test_it_clears_the_tombstone_so_a_reconnect_actually_sticks(self):
+        """The tombstone stops *automatic* reconnection. An explicit connect is the user
+        asking by name, and must not be blocked by their earlier decision — nor leave the
+        tombstone behind to block the next `/clear`."""
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+        self.run_cli("disconnect", "--session-id", "sess-1")
+        self.assertTrue(self.tombstone())
+
+        result = self.run_cli("connect", "x", "--session-id", "sess-1")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tombstone(), {})
+
+    def test_the_marker_still_skips_the_turn_that_reports_the_connect(self):
+        """Only on this path. The turn that runs the slash command ends by relaying its
+        output, which is not worth reading back to the person who typed it — but a launch has
+        no such turn, which is what `test_a_launch_connect_does_not_skip_a_turn` pins."""
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+        self.assertTrue(self.marker()["skip_next_turn"])
+
+
+class TestDisconnectStaysDisconnected(CliTestCase):
+    """W13's sharpest edge. Connecting is automatic now, and `SessionStart` fires again on
+    `/clear` — so without a record of the user's decision, going quiet would silently undo
+    itself. The hook-side half of this is in `test_hooks.py`."""
+
+    def tombstone(self, claude_session_id: str = "sess-1") -> dict:
+        path = self.home / "disconnected" / f"{claude_session_id}.json"
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    def test_it_leaves_a_tombstone(self):
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+
+        self.run_cli("disconnect", "--session-id", "sess-1")
+
+        self.assertEqual(self.tombstone()["claude_session_id"], "sess-1")
+
+    def test_an_unregistered_session_is_tombstoned_too(self):
+        """Someone who runs `/audiochatty-disconnect` in a session that never connected is
+        still stating a preference, and the hook has to honour it."""
+        self.pair()
+
+        self.run_cli("disconnect", "--session-id", "sess-1")
+
+        self.assertTrue(self.tombstone())
+
+    def test_the_tombstone_is_not_mistaken_for_a_registration(self):
+        """It lives in its own directory precisely so nothing globbing `sessions/*.json`
+        picks it up — including the "other registered sessions" list."""
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-2")
+        self.run_cli("disconnect", "--session-id", "sess-2")
+
+        result = self.run_cli("status", "--session-id", "sess-1")
+
+        self.assertNotIn("Other registered sessions", result.stdout)
+
+    def test_status_says_a_disconnected_session_stays_that_way(self):
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+        self.run_cli("disconnect", "--session-id", "sess-1")
+
+        result = self.run_cli("status", "--session-id", "sess-1")
+
+        self.assertIn("was disconnected", result.stdout)
+        self.assertIn("/audiochatty-connect", result.stdout)
+
+
+class TestStatusExplainsASilentLaunchFailure(CliTestCase):
+    """W13 made connecting silent, so `/audiochatty-status` is the only place a failed
+    connect surfaces at all. The wrapper writes the code; this turns it into a sentence."""
+
+    def test_an_unreachable_backend_at_launch_is_named(self):
+        self.pair()
+        self.wrapper.write(connect_error="unreachable")
+
+        result = self.run_cli("status", "--session-id", "sess-1")
+
+        self.assertIn("couldn't reach audiochatty", result.stdout)
+        self.assertIn("/audiochatty-connect", result.stdout)
+
+    def test_a_revoked_token_at_launch_is_named(self):
+        self.pair()
+        self.wrapper.write(connect_error="revoked")
+
+        result = self.run_cli("status", "--session-id", "sess-1")
+
+        self.assertIn("rejected the machine's token", result.stdout)
+        self.assertIn("/audiochatty-login", result.stdout)
+
+    def test_an_unrecognised_code_still_produces_something_honest(self):
+        self.pair()
+        self.wrapper.write(connect_error="something-new")
+
+        result = self.run_cli("status", "--session-id", "sess-1")
+
+        self.assertIn("didn't manage it", result.stdout)
+
+    def test_a_connected_session_never_mentions_a_stale_error(self):
+        """The wrapper clears the field on success, but a stale value must not outrank a
+        working session here either."""
+        self.pair()
+        self.run_cli("connect", "x", "--session-id", "sess-1")
+        self.wrapper.write(bound_to="sess-1", verified=True, connect_error="unreachable")
+
+        result = self.run_cli("status", "--session-id", "sess-1")
+
+        self.assertIn("You can talk to this session from audiochatty", result.stdout)
+        self.assertNotIn("didn't manage it", result.stdout)
+
+    def test_naming_the_cause_still_makes_no_network_calls(self):
+        self.pair()
+        self.wrapper.write(connect_error="unreachable")
+        before = len(self.backend.requests)
+
+        self.run_cli("status", "--session-id", "sess-1")
+
+        self.assertEqual(len(self.backend.requests), before)
 
 
 if __name__ == "__main__":

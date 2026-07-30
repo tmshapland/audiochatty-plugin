@@ -130,7 +130,7 @@ class WrappedSession:
 
     def __init__(self, home: Path, *, exit_code: int = 0, quiet_period: float = QUIET_PERIOD,
                  extra_args: list[str] | None = None, launcher: bool = False,
-                 poll: dict | None = None):
+                 poll: dict | None = None, backend: str | None = None):
         import pty
 
         # Per-session names, because the restart test in `TestDelivery` runs two wrappers
@@ -148,6 +148,12 @@ class WrappedSession:
             AUDIOCHATTY_HOME=str(home),
             FAKE_CLAUDE_LOG=str(self.log),
             FAKE_CLAUDE_EXIT=str(exit_code),
+            # **Never left unset.** Since W13 the wrapper connects itself at launch, and
+            # `audiochat.backend_url()` falls back to the *deployed* backend when nothing
+            # says otherwise — so an unset value here would have this suite registering
+            # sessions against production. Unreachable by default, for the same reason
+            # `bind()` below is: a test that has not asked to talk to a backend must not.
+            AUDIOCHATTY_BACKEND_URL=backend or "http://127.0.0.1:1",
             **POLL,
         )
         env.update(poll or {})
@@ -764,19 +770,31 @@ class TestDelivery(WrapperTestCase):
         session.type(b"still typing")
         self.assertTrue(wait_for(lambda: b"still typing" in session.child_saw()))
 
-    def test_an_unbound_wrapper_makes_no_network_calls(self):
-        """The "costs nothing until connected" property the old channel had, measured rather
-        than assumed. A wrapper has no backend URL until something binds it, so this is true
-        by construction — and worth a test precisely because a later change could make it
-        false without anyone noticing."""
+    def test_an_unpaired_wrapper_makes_no_network_calls(self):
+        """The "costs nothing until connected" property, in the one place W13 left it.
+
+        It used to hold for every unbound wrapper, and Phase 2 measured it. Phase 6.5 spends
+        it knowingly: a paired machine now registers at launch (`TestConnectOnLaunch`). What
+        survives — and what this pins — is that an *unpaired* machine still does nothing at
+        all, so `audiochatty run` before `/audiochatty-login` is indistinguishable from
+        plain `claude`.
+        """
+        (self.home / "credentials.json").unlink()
         with StubBackend() as backend:
-            session = self.start(poll={"AUDIOCHATTY_POLL_ACTIVE": "0.02"})
+            session = self.start(
+                backend=backend.url, poll={"AUDIOCHATTY_POLL_ACTIVE": "0.02"}
+            )
             self.assertFalse(session.call("/status", method="GET")[1]["polling"])
             time.sleep(0.4)
             self.assertEqual(backend.requests, [])
 
-            # And it starts the moment it is bound, with no handshake in between.
+    def test_polling_starts_at_the_bind_with_no_handshake_in_between(self):
+        with StubBackend() as backend:
+            session = self.start(poll={"AUDIOCHATTY_POLL_ACTIVE": "0.02"})
+            self.assertFalse(session.call("/status", method="GET")[1]["polling"])
+
             session.bind(backend_url=backend.url)
+
             self.assertTrue(wait_for(lambda: backend.requests_to("/agent/inbound")))
             self.assertTrue(session.call("/status", method="GET")[1]["polling"])
 
@@ -860,6 +878,171 @@ class TestDelivery(WrapperTestCase):
             # Stop typing: it lands, and only then is it acked.
             self.assertTrue(wait_for(lambda: b"\x1b[200~" in session.child_saw(), timeout=5))
             self.assertTrue(wait_for(lambda: backend.requests_to("/agent/inbound/ack")))
+
+
+class TestConnectOnLaunch(WrapperTestCase):
+    """Phase 6.5 · W13. `audiochatty run` is the whole of the setup: the wrapper registers
+    its own session and binds itself, so nothing has to be typed into the session.
+
+    Every test here starts a *real* wrapper against a stub backend and asserts on what the
+    backend received, because the thing worth breaking is the wiring — a connect that runs on
+    the wrong thread, before the control server, or not at all.
+    """
+
+    def marker(self, claude_session_id: str) -> dict:
+        path = self.home / "sessions" / f"{claude_session_id}.json"
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    def test_a_launch_registers_binds_and_reports_reachable(self):
+        with StubBackend() as backend:
+            session = self.start(backend=backend.url)
+
+            self.assertTrue(
+                wait_for(lambda: backend.requests_to("/agent/session"), timeout=10),
+                f"never registered: {session.stderr()}",
+            )
+            registration = backend.last_request("/agent/session")
+            self.assertEqual(
+                registration["body"]["claude_session_id"], session.session_id
+            )
+            self.assertEqual(registration["authorization"], f"Bearer {TOKEN}")
+
+            # Bound in-process, so there is no `/bind` request to observe — the rendezvous
+            # file is the evidence, and `verified` proves it went through the real bind rules
+            # rather than being written by hand.
+            self.assertTrue(wait_for(lambda: session.reread().get("bound"), timeout=10))
+            self.assertEqual(session.record["claude_session_id"], session.session_id)
+            self.assertTrue(session.record["verified"])
+            self.assertTrue(
+                wait_for(lambda: backend.requests_to("/agent/session/verified"), timeout=10)
+            )
+
+    def test_the_marker_is_written_so_the_stop_hook_can_fire(self):
+        with StubBackend() as backend:
+            session = self.start(backend=backend.url)
+            self.assertTrue(
+                wait_for(lambda: self.marker(session.session_id), timeout=10)
+            )
+            marker = self.marker(session.session_id)
+
+            self.assertEqual(marker["name"], "billing-refactor")
+            self.assertEqual(marker["wrapper_pid"], session.proc.pid)
+            # No connect *turn* to swallow on this path — the next turn is real work.
+            self.assertNotIn("skip_next_turn", marker)
+
+    def test_polling_starts_without_anyone_binding_by_hand(self):
+        with StubBackend() as backend:
+            session = self.start(
+                backend=backend.url, poll={"AUDIOCHATTY_POLL_ACTIVE": "0.05"}
+            )
+
+            self.assertTrue(
+                wait_for(lambda: backend.requests_to("/agent/inbound"), timeout=10)
+            )
+            self.assertTrue(session.call("/status", method="GET")[1]["polling"])
+
+    def test_the_name_can_be_chosen_at_launch(self):
+        """`--name` replaces the argument `/audiochatty-connect [name]` used to take. Without
+        it W13 would silently remove the ability to name a session at all."""
+        with StubBackend() as backend:
+            self.start(backend=backend.url, extra_args=["--name", "auth-bug"])
+
+            self.assertTrue(wait_for(lambda: backend.requests_to("/agent/session"), timeout=10))
+            self.assertEqual(
+                backend.last_request("/agent/session")["body"]["name"], "auth-bug"
+            )
+
+    def test_a_resumed_session_is_left_for_the_hook(self):
+        """`--resume` means the session id is not ours to mint, so `expected_session_id` is
+        null and the wrapper cannot know what to register. It must not guess — that case
+        belongs to the SessionStart hook, which runs inside the session."""
+        with StubBackend() as backend:
+            session = self.start(backend=backend.url, extra_args=["--", "--resume"])
+
+            self.assertIsNone(session.record["expected_session_id"])
+            time.sleep(0.6)
+            self.assertEqual(backend.requests_to("/agent/session"), [])
+            self.assertFalse(session.reread().get("bound"))
+            # And nothing is recorded as an error: this is a handoff, not a failure.
+            self.assertIsNone(session.record.get("connect_error"))
+
+    def test_a_dead_backend_leaves_a_usable_terminal_and_a_readable_reason(self):
+        """The connect runs on a thread precisely so this is true. The default fixture
+        backend is `127.0.0.1:1`, which refuses instantly."""
+        session = self.start()
+
+        # The terminal works: the child is up and keystrokes still reach it.
+        session.type(b"hello")
+        self.assertTrue(wait_for(lambda: b"hello" in session.child_saw(), timeout=5))
+
+        self.assertTrue(
+            wait_for(lambda: session.reread().get("connect_error"), timeout=10),
+            "a silent failure with nothing written down is the one outcome W13 forbids",
+        )
+        self.assertEqual(session.record["connect_error"], "unreachable")
+        self.assertTrue(session.record["connect_error_at"])
+        self.assertFalse(session.record["bound"])
+
+    def test_a_slow_backend_does_not_delay_the_terminal(self):
+        """The whole reason step 3a is on a thread. A sleeping Render service takes its full
+        timeout, and the user is typing."""
+        with StubBackend() as backend:
+            backend.reply("/agent/session", 200, {"session_id": "s-a", "name": "x"}, delay=2.0)
+            started = time.monotonic()
+            session = self.start(backend=backend.url)
+            elapsed = time.monotonic() - started
+
+            session.type(b"typed while it registers")
+            self.assertTrue(
+                wait_for(lambda: b"typed while it registers" in session.child_saw(), timeout=5)
+            )
+            self.assertLess(elapsed, 2.0, "the launch waited for the registration")
+
+    def test_an_unpaired_launch_records_no_error(self):
+        """Not paired is not a failure — it is a machine that has not opted in, and
+        `/audiochatty-status` already says so from the credentials file. Recording an error
+        would put a scary line in front of someone who simply has not logged in yet."""
+        (self.home / "credentials.json").unlink()
+        with StubBackend() as backend:
+            session = self.start(backend=backend.url)
+
+            time.sleep(0.6)
+            self.assertEqual(backend.requests, [])
+            self.assertIsNone(session.reread().get("connect_error"))
+
+    def test_the_launch_says_nothing_on_the_users_screen(self):
+        """👤 confirmed the silence (2026-07-29). It is also a hard constraint: stdout is the
+        child's screen and a stray line there is a corrupted TUI."""
+        with StubBackend() as backend:
+            session = self.start(backend=backend.url)
+            self.assertTrue(wait_for(lambda: session.reread().get("bound"), timeout=10))
+
+            self.assertNotIn(b"audiochatty", session.screen())
+            self.assertNotIn("audiochatty:", session.stderr())
+
+    def test_a_failed_connect_can_be_retried_by_hand_without_restarting(self):
+        """What `/audiochatty-connect` is *for* now. The wrapper is running and unbound; the
+        slash command finds it through the same rendezvous file and binds it over loopback."""
+        session = self.start()  # unreachable backend, so the launch connect fails
+        self.assertTrue(wait_for(lambda: session.reread().get("connect_error"), timeout=10))
+
+        with StubBackend() as backend:
+            env = dict(os.environ)
+            env.update(
+                AUDIOCHATTY_HOME=str(self.home),
+                AUDIOCHATTY_BACKEND_URL=backend.url,
+                AUDIOCHATTY_WRAPPER_PORT=str(session.port),
+                AUDIOCHATTY_WRAPPER_PID=str(session.proc.pid),
+            )
+            result = subprocess.run(
+                [sys.executable, str(PLUGIN_ROOT / "scripts" / "audiochat.py"),
+                 "connect", "retried", "--session-id", session.session_id],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(wait_for(lambda: session.reread().get("bound"), timeout=10))
+            self.assertEqual(session.record["claude_session_id"], session.session_id)
 
 
 class TestTerminalBehaviour(WrapperTestCase):

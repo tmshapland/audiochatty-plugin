@@ -1,6 +1,18 @@
 {
-  "description": "audiochatty ingest. Stop posts a completed turn for sessions registered with /audiochatty-connect; SessionEnd retires a registration, but only when the session has really ended. Both exit silently and never block the terminal.",
+  "description": "audiochatty ingest and connect. SessionStart connects a resumed session to the `audiochatty run` wrapper that started it (W13; ordinary launches connect themselves). Stop posts a completed turn for connected sessions; SessionEnd retires a registration, but only when the session has really ended. All three exit silently, print nothing on stdout, and never block the terminal.",
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session_start_hook.py"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

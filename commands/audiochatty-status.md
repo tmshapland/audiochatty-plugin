@@ -15,3 +15,7 @@ Relay the above to the user verbatim, including any command it prints. It is ent
 that holds this session's return path. This is the command someone runs when audiochatty
 says a session can't be talked to, so the diagnosis it prints is the point of it; don't
 summarise it away.
+
+That matters more than it used to: a session started with `audiochatty run` connects itself
+without printing anything, so a connect that *failed* — audiochatty unreachable, a revoked
+device — is invisible in the terminal. This command is the only place that reason surfaces.

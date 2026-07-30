@@ -19,14 +19,18 @@ Both halves stop the moment you disconnect or disable the plugin.
 
 **Scope, up front, because it's the part people get wrong:** install, `/audiochatty-login`,
 and making `audiochatty` a command are one-time, per machine. Starting the session with
-`audiochatty run` and then `/audiochatty-connect` are **not** — they repeat for *every single
-Claude Code launch* you want audiochatty in at all, with no way to make it stick.
+`audiochatty run` is **not** — it repeats for *every single Claude Code launch* you want
+audiochatty in at all, with no way to make it stick.
 
-It's also all-or-nothing *at the point of connecting*: in a session started with plain
-`claude`, `/audiochatty-connect` refuses outright rather than half-connecting, so that session
-sends nothing and receives nothing — full stop, not "listen-only." There is no listen-only
-state at all any more: a successful connect starts both directions at once, and a refused one
-starts neither. See sections 3 and 4.
+But it is the *only* thing that repeats. `audiochatty run` connects the session itself, so
+there is no second command to remember and nothing to type into the session. If you used an
+earlier version of this plugin and are looking for `/audiochatty-connect`, section 4 explains
+what became of it.
+
+It's also all-or-nothing: a session started with plain `claude` sends nothing and receives
+nothing — full stop, not "listen-only." There is no listen-only state at all. Launching
+through audiochatty starts both directions at once; launching with `claude` starts neither.
+See sections 3 and 4.
 
 ## 1. Install the plugin (once per machine)
 
@@ -65,10 +69,10 @@ Enter that code at **audiochatty → Settings → Link a coding agent** in your 
 
       audiochatty run
 
-  then run /audiochatty-connect there. It's the same Claude Code you already use —
-  same terminal, nothing to load, no warning — with a return path attached. Under
-  plain `claude` there is nothing to tell that session, and /audiochatty-connect
-  refuses outright rather than registering a session you can't reach.
+  That's the whole of it — it connects the session for you, so there's nothing to
+  run afterwards. It's the same Claude Code you already use: same terminal, nothing
+  to load, no warning, with a return path attached. A session started with plain
+  `claude` has no return path, so there is nothing there to tell it what to do.
 
   If `audiochatty` isn't a command on this machine yet, that is one line in your
   shell profile:
@@ -92,9 +96,9 @@ argument.
 
 ## 3. Why you start it with `audiochatty run`
 
-**In a session started with plain `claude`, audiochatty will not connect at all —
-`/audiochatty-connect` refuses outright, every time, and this repeats for every new session.**
-Everything below explains why, but that's the one sentence to not miss.
+**In a session started with plain `claude`, audiochatty will not connect at all, ever, and
+this repeats for every new session.** Everything below explains why, but that's the one
+sentence to not miss.
 
 The receive direction has to type into a session that is *already running*, and nothing inside
 a session can do that — not a plugin, not a hook, not a slash command. So the thing that types
@@ -124,31 +128,51 @@ What that buys, and what it costs:
 Everything after `run` goes to `claude` unchanged, so `audiochatty run --model opus` works,
 and `audiochatty run -- --resume` handles the flags that would otherwise clash.
 
-## 4. Connect a session — `/audiochatty-connect [name]` (once per session)
-
-Launch Claude Code through audiochatty, then connect:
+## 4. What happens when you launch it (nothing for you to do)
 
 ```
-> audiochatty run
-> /audiochatty-connect billing-refactor
-  This session is now "billing-refactor" in audiochatty.
-  You can hear what it does, and tell it what to do next, from audiochatty.
+$ audiochatty run
 ```
 
-The name is how the session shows up in your inbox; it defaults to the current folder
-name if you omit it.
+That's the whole of it. The session registers itself under the current folder's name and is
+ready to talk to before you've finished reading this sentence. To choose the name:
+
+```
+$ audiochatty run --name billing-refactor
+```
+
+The name is how the session shows up in your inbox.
+
+**It connects silently, and that's deliberate.** Nothing is printed about it — the screen
+belongs to Claude Code's interface, and a line written into it is a corrupted display. So the
+confirmation is the session appearing in your inbox, and `/audiochatty-status` is the local
+answer if you want one.
+
+The flip side is worth knowing: a connect that *fails* is equally invisible. If audiochatty is
+unreachable or this machine's device token has been revoked, the terminal looks exactly the
+same and the session simply never appears on your phone. `/audiochatty-status` names the cause,
+and `/audiochatty-connect` retries it without restarting anything.
 
 **There is no handshake to wait for.** An earlier version had one — a nonce injected into the
 session, a tool call to answer it, a retry if it went unanswered — because a channel genuinely
 could not tell whether its events were being honoured. The wrapper owns the terminal, so
-connecting *is* the proof: `/audiochatty-connect` tells the backend this session is reachable
-in the same breath, and your phone shows it as reachable immediately.
+connecting *is* the proof: your phone shows the session as reachable immediately.
 
-`/audiochatty-connect` is **per session, not per machine** — a new terminal tab is a new
-session and needs its own connect. It also **refuses outright** (rather than half-connecting)
-in a session that wasn't started with `audiochatty run`, and prints the command to start again
-with. This is what that refusal looks like — it's the single most common thing you'll hit,
-usually from forgetting that the launch command repeats every time:
+### What became of `/audiochatty-connect`
+
+It used to be a required second step, run inside every session. It isn't any more, and it isn't
+needed for a normal launch — run it and it will most likely just tell you the session is
+already connected. It survives for three things, none of which needs you to restart Claude
+Code:
+
+| | |
+| --- | --- |
+| **Retry** | audiochatty was down when the session launched, so the connect failed. |
+| **Rename** | `/audiochatty-connect auth-bug` renames this session in your inbox. |
+| **Reconnect** | you ran `/audiochatty-disconnect` earlier and want it back. |
+
+It still **refuses outright** in a session that wasn't started with `audiochatty run`, and
+prints the command to start again with:
 
 ```
 > /audiochatty-connect
@@ -160,7 +184,8 @@ usually from forgetting that the launch command repeats every time:
       audiochatty run
 
   That is the same Claude Code you already use — same terminal, no plugin to load,
-  no warning — with a return path attached. Then run /audiochatty-connect again.
+  no warning — and it connects the session itself, so there's nothing to run after
+  it.
 
   If `audiochatty` isn't a command on this machine yet, that is one line in your
   shell profile:
@@ -170,27 +195,41 @@ usually from forgetting that the launch command repeats every time:
 
 There is one other refusal, rarer and worth recognising: if you run plain `claude` from
 *inside* a wrapped session — a Bash tool call, a nested shell — that inner session inherits the
-outer wrapper's environment without owning it. `/audiochatty-connect` detects that and refuses,
-because connecting it would type your instructions into the outer terminal instead of the one
-you're looking at.
+outer wrapper's environment without owning it. Nothing connects it automatically, and
+`/audiochatty-connect` refuses it too, because connecting it would type your instructions into
+the outer terminal instead of the one you're looking at. The same applies to a forked session
+(`/fork`, `/branch`, `--fork-session`).
+
+### One case where a hook does the connecting
+
+`audiochatty run` knows the session id because it chooses it. With `--resume`, `--continue`, or
+`/resume`, the session id is not its to choose, so a small `SessionStart` hook does the connect
+from inside the session instead. Nothing about this is visible to you — `audiochatty run
+--resume` behaves exactly like a fresh launch — but it's why the plugin registers a
+`SessionStart` hook at all.
 
 ## 5. Everyday commands
 
 | Command | What it does | Network call? |
 | --- | --- | --- |
 | `/audiochatty-login` | Pair this machine. Once per machine. | Yes |
-| `/audiochatty-connect [name]` | Connect *this* session, both directions. | Yes |
-| `/audiochatty-status` | Is this machine paired, is this session connected, can it be talked to. | No — entirely local |
-| `/audiochatty-disconnect` | Stop sending and receiving for this session. The machine stays paired and the session keeps running. | No |
+| `/audiochatty-connect [name]` | Rarely needed — see section 4. Retry a failed connect, rename this session, or reconnect a disconnected one. | Yes |
+| `/audiochatty-status` | Is this machine paired, is this session connected, can it be talked to, and why not. | No — entirely local |
+| `/audiochatty-disconnect` | Stop sending and receiving for this session. The machine stays paired and the session keeps running. | Yes — after the local teardown, and a failure is swallowed |
+
+The one command that isn't in this table is the one that matters most: **`audiochatty run`**,
+which is how you start a session at all.
 
 Every other terminal you have open is unaffected — the `Stop` hook runs globally but
-finds no marker file for an unconnected session and exits; any other `audiochatty run` you
-have open sits idle and unbound.
+finds no marker file for an unconnected session and exits; the `SessionStart` hook does one
+environment-variable check and exits; and a session started with plain `claude` has nothing
+listening to it.
 
 ## 6. Turning it off
 
 - **For one session:** `/audiochatty-disconnect`. The session carries on; it just goes quiet
-  in both directions.
+  in both directions. **It stays quiet** — including across a `/clear`, which re-runs the
+  thing that normally connects a session. Only `/audiochatty-connect` brings it back.
 - **Disable everywhere:** `claude plugin disable audiochatty`, and go back to starting sessions
   with `claude`.
 - **Remove entirely:** `claude plugin uninstall audiochatty && rm -rf ~/.audiochatty`
@@ -222,15 +261,20 @@ payload shapes:
 Start with `/audiochatty-status` — it's local-only and diagnoses which half is broken. In
 order of likelihood:
 
-1. **Started with `claude`, not `audiochatty run`.** `/audiochatty-connect` will refuse and
-   print the command to start again with — use it verbatim.
-2. **Session never connected.** Connect is per-session; a fresh terminal needs its own
-   `/audiochatty-connect`.
-3. **An instruction hasn't arrived yet.** Give it 30 seconds, the slow end of the poll. Also
+1. **Started with `claude`, not `audiochatty run`.** Nothing connected the session, and
+   nothing can. `/audiochatty-status` says so, and `/audiochatty-connect` refuses and prints
+   the command to start again with — use it verbatim. `audiochatty run` is per session, so a
+   fresh terminal needs it again.
+2. **The connect failed at launch, silently.** It has no way to tell you (section 4).
+   `/audiochatty-status` names the cause — audiochatty unreachable, or a revoked device — and
+   `/audiochatty-connect` retries without restarting the session.
+3. **You disconnected it earlier.** That is sticky by design and survives a `/clear`.
+   `/audiochatty-status` will say so; `/audiochatty-connect` undoes it.
+4. **An instruction hasn't arrived yet.** Give it 30 seconds, the slow end of the poll. Also
    check you aren't mid-way through typing a line: the wrapper deliberately waits for you to
    pause rather than typing over you, so a slow instruction is often that working.
-4. **Backend asleep/down.** Silent drop by design; wait, or check `/audiochatty-status`.
-5. **Device revoked.** Everything 401s silently — re-run `/audiochatty-login`.
+5. **Backend asleep/down.** Silent drop by design; wait, or check `/audiochatty-status`.
+6. **Device revoked.** Everything 401s silently — re-run `/audiochatty-login`.
 
 Debug logging: set `AUDIOCHATTY_DEBUG=1` for one stderr line per hook run, more detail from
 `/audiochatty-connect` about which wrapper it found and why it accepted or refused it, and a

@@ -23,9 +23,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import stop_hook  # noqa: E402
 from stub_backend import StubBackend  # noqa: E402
 
+# A real loopback server plus a real rendezvous file. Imported rather than copied — the
+# SessionStart hook's job is to find one of those and POST to it, which is the same thing
+# `connect` does, so it wants the same fixture.
+from test_cli import FakeWrapper  # noqa: E402
+
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 STOP = SCRIPTS / "stop_hook.py"
 SESSION_END = SCRIPTS / "session_end_hook.py"
+SESSION_START = SCRIPTS / "session_start_hook.py"
 
 # A blackhole address: the connection neither completes nor is refused, so this exercises
 # the *timeout*, which is the case a user would actually feel. 127.0.0.1:1 is refused
@@ -60,10 +66,21 @@ class HookTestCase(unittest.TestCase):
         (sessions / f"{claude_session_id}.json").write_text(json.dumps(marker))
 
     def run_hook(self, script: Path, payload: dict, backend: str | None = None,
-                 timeout: float = 60) -> subprocess.CompletedProcess:
+                 timeout: float = 60, wrapper=None, wrapper_env: bool = True,
+                 env_extra: dict | None = None) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["AUDIOCHATTY_HOME"] = str(self.home)
         env["AUDIOCHATTY_BACKEND_URL"] = backend if backend is not None else self.backend.url
+        env.update(env_extra or {})
+        # Never inherited, always stated — same trap as `test_cli.run_cli`. Whoever runs this
+        # suite may be sitting inside a real `audiochatty run`, and the SessionStart hook acts
+        # on these two: inheriting them would point it at their actual session and POST
+        # `/bind` to it.
+        env.pop("AUDIOCHATTY_WRAPPER_PORT", None)
+        env.pop("AUDIOCHATTY_WRAPPER_PID", None)
+        if wrapper is not None and wrapper_env:
+            env["AUDIOCHATTY_WRAPPER_PORT"] = str(wrapper.port)
+            env["AUDIOCHATTY_WRAPPER_PID"] = str(wrapper.pid)
         return subprocess.run(
             [sys.executable, str(script)],
             input=json.dumps(payload),
@@ -545,6 +562,207 @@ class TestSessionEndReasons(HookTestCase):
                     capture_output=True, text=True, timeout=30,
                 )
                 self.assertEqual(result.returncode, 0)
+                self.assertNotIn("Traceback", result.stderr)
+
+
+# -- SessionStart: the half of W13 the wrapper can't do itself ---------------------------
+
+
+class TestSessionStartConnects(HookTestCase):
+    """Phase 6.5 · W13. `audiochatty run` connects the session it started, because it minted
+    that session's id. This hook exists for the one case it can't: `--resume`, `--continue`,
+    or an explicit `--session-id`, where the id is the user's and only the session knows it.
+
+    **The two halves are disjoint by construction** — this hook stands down whenever the
+    rendezvous file carries an `expected_session_id` — so they can never race to register the
+    same session. Several tests below pin exactly that.
+
+    `FakeWrapper` is imported from `test_cli` rather than copied: it is a real loopback server
+    plus a real rendezvous file, and a second implementation of it would drift.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        # A resumed session's wrapper: it never chose a session id, and nothing is bound yet.
+        self.wrapper = FakeWrapper(self.home, expected_session_id=None)
+        self.addCleanup(self.wrapper.stop)
+
+    def start_payload(self, **overrides) -> dict:
+        """Recorded `SessionStart` input. Verified against the hooks reference 2026-07-29:
+        `source` is one of startup / resume / clear / compact / fork."""
+        payload = {
+            "session_id": "sess-1",
+            "transcript_path": str(self.home / "transcript.jsonl"),
+            "cwd": "/Users/mike/repos/audiochat",
+            "hook_event_name": "SessionStart",
+            "source": "resume",
+        }
+        payload.update(overrides)
+        return payload
+
+    def run_start(self, **kwargs) -> subprocess.CompletedProcess:
+        payload = kwargs.pop("payload", None) or self.start_payload()
+        return self.run_hook(SESSION_START, payload, wrapper=self.wrapper, **kwargs)
+
+    def marker(self, claude_session_id: str = "sess-1") -> dict:
+        path = self.home / "sessions" / f"{claude_session_id}.json"
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    # -- the case it exists for --
+
+    def test_a_resumed_session_is_registered_and_bound(self):
+        result = self.run_start()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.backend.last_request("/agent/session")["body"]["claude_session_id"], "sess-1"
+        )
+        bind = self.wrapper.requests_to("/bind")
+        self.assertEqual(len(bind), 1)
+        self.assertEqual(bind[0]["body"]["claude_session_id"], "sess-1")
+        self.assertEqual(self.marker()["claude_session_id"], "sess-1")
+
+    def test_the_name_comes_from_the_hooks_cwd(self):
+        """The hook's payload carries the working directory, which is more trustworthy here
+        than this process's own — the hook may not be started in it."""
+        self.run_start(payload=self.start_payload(cwd="/tmp/some-repo"))
+
+        self.assertEqual(
+            self.backend.last_request("/agent/session")["body"]["name"], "some-repo"
+        )
+
+    def test_a_launch_connect_does_not_skip_a_turn(self):
+        """The mirror of `test_the_marker_still_skips_the_turn_that_reports_the_connect`.
+        `skip_next_turn` exists to swallow the turn whose only content is the slash command's
+        own output. There is no such turn here, so the next real turn must be reported."""
+        self.run_start()
+
+        self.assertNotIn("skip_next_turn", self.marker())
+
+    def test_it_marks_the_session_reachable(self):
+        self.run_start()
+
+        self.assertEqual(len(self.backend.requests_to("/agent/session/verified")), 1)
+
+    # -- the cases it declines --
+
+    def test_it_stands_down_when_the_wrapper_minted_the_session_id(self):
+        """The ordinary launch. `wrapper/connect.py` is already doing this, and both doing it
+        would be a race for no benefit."""
+        self.wrapper.write(expected_session_id="sess-1")
+
+        result = self.run_start()
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.backend.requests_to("/agent/session"), [])
+        self.assertEqual(self.wrapper.requests_to("/bind"), [])
+
+    def test_an_already_registered_session_is_left_alone(self):
+        self.register("sess-1")
+
+        self.run_start()
+
+        self.assertEqual(self.backend.requests_to("/agent/session"), [])
+
+    def test_a_disconnected_session_is_not_reconnected(self):
+        """W13's sharpest edge, and the reason the tombstone exists. `/clear` fires this hook
+        again in the same session, so without it a user who deliberately went quiet would be
+        reconnected a minute later by a hook they never ran."""
+        (self.home / "disconnected").mkdir(parents=True, exist_ok=True)
+        (self.home / "disconnected" / "sess-1.json").write_text(
+            json.dumps({"claude_session_id": "sess-1"})
+        )
+
+        result = self.run_start(payload=self.start_payload(source="clear"))
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.backend.requests_to("/agent/session"), [])
+        self.assertEqual(self.wrapper.requests_to("/bind"), [])
+        self.assertEqual(self.marker(), {})
+
+    def test_a_forked_session_is_refused_like_a_nested_one(self):
+        """A fork gets a new session id and inherits the wrapper's environment. Binding it
+        would aim spoken instructions at the original session's terminal — the same W3
+        refusal, for the same reason."""
+        self.wrapper.write(expected_session_id="the-original-session")
+
+        self.run_start(payload=self.start_payload(session_id="the-forked-one", source="fork"))
+
+        self.assertEqual(self.backend.requests_to("/agent/session"), [])
+        self.assertEqual(self.wrapper.requests_to("/bind"), [])
+
+    def test_an_unpaired_machine_makes_no_network_call(self):
+        (self.home / "credentials.json").unlink()
+
+        result = self.run_start()
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.backend.requests, [])
+        self.assertEqual(self.wrapper.requests_to("/bind"), [])
+
+    def test_a_session_with_no_wrapper_costs_nothing(self):
+        """The common case on any machine: every other terminal open that day. One
+        environment read and out, without touching the disk."""
+        result = self.run_start(wrapper_env=False)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.backend.requests, [])
+        self.assertEqual(self.marker(), {})
+
+    def test_an_already_bound_wrapper_is_not_rebound(self):
+        self.wrapper.write(bound_to="sess-1", verified=True)
+
+        self.run_start()
+
+        self.assertEqual(self.wrapper.requests_to("/bind"), [])
+
+    # -- the rules that apply on every path --
+
+    def test_it_never_writes_to_stdout(self):
+        """**A correctness requirement, not a style choice.** The hooks reference is explicit
+        that `SessionStart`'s stdout is added to the model's context — so one stray line here
+        would be injected into every session on this machine, forever."""
+        cases = {
+            "connects": {},
+            "declines": {"payload": self.start_payload(source="clear")},
+            "no wrapper": {"wrapper_env": False},
+        }
+        for label, kwargs in cases.items():
+            with self.subTest(label):
+                result = self.run_start(**kwargs)
+                self.assertEqual(result.stdout, "")
+
+    def test_debug_output_goes_to_stderr(self):
+        result = self.run_hook(
+            SESSION_START, self.start_payload(), wrapper=self.wrapper,
+            env_extra={"AUDIOCHATTY_DEBUG": "1"},
+        )
+
+        self.assertEqual(result.stdout, "")
+        self.assertIn("[audiochatty]", result.stderr)
+
+    def test_an_unreachable_backend_is_survivable_and_silent(self):
+        result = self.run_start(backend=UNROUTABLE)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.marker(), {})
+
+    def test_garbage_on_stdin_is_survivable(self):
+        for raw in ("", "not json", "[]"):
+            with self.subTest(raw=raw):
+                result = subprocess.run(
+                    [sys.executable, str(SESSION_START)],
+                    input=raw,
+                    env={**os.environ, "AUDIOCHATTY_HOME": str(self.home),
+                         "AUDIOCHATTY_BACKEND_URL": self.backend.url,
+                         "AUDIOCHATTY_WRAPPER_PORT": str(self.wrapper.port),
+                         "AUDIOCHATTY_WRAPPER_PID": str(self.wrapper.pid)},
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
                 self.assertNotIn("Traceback", result.stderr)
 
 

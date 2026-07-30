@@ -53,8 +53,16 @@ atomically (`AUDIOCHATTY_HOME` overrides `~/.audiochatty`, as everywhere else he
       "session_name": null,
       "backend_url": null,
       "bound_at": null,
-      "verified_at": null
+      "verified_at": null,
+      "connect_error": null,        # W13; see below
+      "connect_error_at": null
     }
+
+`connect_error` is Phase 6.5's addition and the only field here that exists for a *user* to
+read rather than a program. W13 made connecting happen at launch and print nothing, so a
+failure has nowhere to go; this is where it goes, and `/audiochatty-status` turns the code
+into a sentence. Additive, like `polling` and `verified_reported` before it — a reader that
+ignores it is still correct.
 
 **The device token is deliberately not in here.** It lives in `credentials.json` and has
 no business being copied into a second file. Everything above is either public (a port, a
@@ -118,12 +126,23 @@ anything actually asking?
     1. bind the loopback socket        → we need its port before the child exists
     2. spawn `claude` on a pty         → still single-threaded: see below
     3. start the control server thread → now threads are allowed
+    3a. connect this session (W13)     → on a thread; never blocks the terminal
     4. run the proxy loop              → until the child exits
     5. exit with the child's code      → `audiochatty run` behaves like `claude` in a script
 
-The poll loop is not in that list because it is not started here: nothing polls until a
-session binds, and until then this process makes no network calls at all. `/bind` starts
-it, `/unbind` stops it, and step 5 closes it — see `poller.py`.
+Step 3a is Phase 6.5 and it is what makes `audiochatty run` the whole of the setup: the
+wrapper registers its own session and binds itself, so nothing has to be typed into the
+session. It comes after step 3 because the bind starts the poll loop and the control server
+has to be up, and it runs on a thread because a sleeping backend must never make a terminal
+wait. See `connect.py`, which also documents the one case it hands off to a `SessionStart`
+hook (`--resume`, where the session id isn't ours to mint).
+
+**This is where the old "an unbound wrapper makes zero network calls" property went.** It
+held while connecting was a separate act, Phase 2 measured it, and W13 spends it knowingly:
+on a paired machine every wrapped launch now registers and starts polling. The property
+survives in exactly one case, and it is worth keeping — an *unpaired* machine still does
+nothing and calls nothing, so `audiochatty run` before `/audiochatty-login` is indis-
+tinguishable from plain `claude`.
 
 Steps 1-3 are in that order because step 2 forks, and `subprocess`'s `preexec_fn` runs
 Python between the fork and the exec. In a process that already has threads, that is a
@@ -146,7 +165,7 @@ _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
-from wrapper import store  # noqa: E402
+from wrapper import connect, store  # noqa: E402
 from wrapper.control import ControlServer  # noqa: E402
 from wrapper.inject import DEFAULT_QUIET_PERIOD, Injector  # noqa: E402
 from wrapper.poller import Poller  # noqa: E402
@@ -181,6 +200,12 @@ def build_parser() -> argparse.ArgumentParser:
             "Seconds of no typing before a spoken instruction is typed in (W6). "
             f"Default {DEFAULT_QUIET_PERIOD}."
         ),
+    )
+    run.add_argument(
+        "--name",
+        default=None,
+        help="What to call this session in audiochatty. Defaults to the current folder's "
+        "name. Replaces the argument `/audiochatty-connect [name]` used to take (W13).",
     )
     run.add_argument(
         "--verbose",
@@ -258,6 +283,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         proxy.restore_terminal()
         control.close()
         raise
+
+    # 3a. W13: connect this session ourselves, on a thread, silently. After step 3 because
+    # the poll loop is started by the bind and the control server has to be up; on a thread
+    # because a sleeping backend must not delay a terminal that is already drawing. An
+    # unpaired machine makes no network call at all — see `connect.connect`.
+    connect.start(state, name=args.name)
 
     try:
         return proxy.run()

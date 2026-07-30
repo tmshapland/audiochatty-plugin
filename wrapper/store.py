@@ -152,6 +152,11 @@ class WrapperState:
             "backend_url": None,
             "bound_at": None,
             "verified_at": None,
+            # W13. Connecting happens at launch and prints nothing — stdout is the child's
+            # screen — so a *failed* connect would otherwise vanish without trace. These two
+            # are where the reason goes, and `/audiochatty-status` is what reads them out.
+            "connect_error": None,
+            "connect_error_at": None,
         }
         self._write()
 
@@ -180,6 +185,23 @@ class WrapperState:
             self.path.unlink()
         except OSError:
             pass
+
+    def record_connect_error(self, error: str) -> None:
+        """W13. The launch tried to connect and couldn't; leave the reason where
+        `/audiochatty-status` will find it.
+
+        Only the machine-readable code is stored. The sentence a user reads belongs with the
+        command that talks to users (`audiochat._connect_error_line`), so the same failure
+        does not end up worded two ways.
+        """
+        self._write(connect_error=error or None, connect_error_at=now_iso() if error else None)
+        debug(f"connect at launch failed: {error}")
+
+    def clear_connect_error(self) -> None:
+        with self._lock:
+            if not self._record.get("connect_error"):
+                return
+        self._write(connect_error=None, connect_error_at=None)
 
     # -- the decisions --
 

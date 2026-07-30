@@ -7,24 +7,31 @@
 what makes "read the repo, then install it" an honest offer (§5), and it is easy to break
 with one convenient import. There is nothing to add here that is worth a dependency.
 
-Four subcommands, one per slash command, plus the two hook scripts that import this module:
+Four subcommands, one per slash command, plus the three hook scripts that import this
+module:
 
     login       the RFC 8628 device flow — mint a code, then redeem it
     connect     register this Claude Code session under a name
     status      local-only: is this machine paired, is this session registered
     disconnect  retire this session
 
+**`connect` is no longer a step in the happy path** (`wrapper_return_path_plan.md` W13).
+`audiochatty run` connects the session it starts, and `scripts/session_start_hook.py`
+connects the ones it could not name up front. The subcommand stays for repair — retry,
+rename, reconnect — and the protocol all three share is `connect_session` below.
+
 **What is on disk, and why so little.** `~/.audiochatty/` (0700) holds a credentials file
-(0600) with the device token, a `sessions/` directory of marker files, a `wrappers/`
-directory each `audiochatty run` writes its rendezvous into, and — only while a pairing is
-in flight — a `pending.json` holding the `device_code`. Nothing else.
+(0600) with the device token, a `sessions/` directory of marker files, a `disconnected/`
+directory of tombstones for sessions the user closed by hand, a `wrappers/` directory each
+`audiochatty run` writes its rendezvous into, and — only while a pairing is in flight — a
+`pending.json` holding the `device_code`. Nothing else.
 
 **There is one long-lived process now, it is not this one, and it is not inside the
 session.** The return path is `wrapper/` — the process `audiochatty run` is
 (`wrapper_return_path_plan.md` W1). It started this `claude` on a pty and can type into it,
-it does nothing until `connect` binds it, and everything this file does about it is in "the
-wrapper" section below. This script itself is still what it was — short-lived, one job,
-then gone.
+it connects itself once the session exists, and everything this file does about it is in
+"the wrapper" section below. This script itself is still what it was — short-lived, one
+job, then gone.
 
 **The token is never printed and never taken as an argument.** Anything typed into a
 Claude Code prompt lands in the session `.jsonl` and in the model's context, and anything
@@ -342,6 +349,53 @@ def consume_skip_next_turn(claude_session_id: str, marker: dict) -> bool:
     return True
 
 
+# -- the disconnect tombstone (W13) ----------------------------------------------------
+#
+# `audiochatty run` connects its own session, and a `SessionStart` hook connects the ones
+# it could not name up front (`--resume`). Both are automatic, and automatic reconnection
+# is exactly wrong in one case: a session the user *deliberately* disconnected. `/clear`
+# fires `SessionStart` again in the same session, so without a record of that decision a
+# privacy action would silently undo itself a minute later.
+#
+# So `disconnect` leaves a tombstone, and only an explicit `/audiochatty-connect` clears
+# it. A hook firing is not a decision; a typed command is. The rule this encodes: **never
+# reconnect a session automatically after the user has closed it.**
+#
+# It lives in its own directory rather than beside the markers so it cannot be mistaken
+# for one by anything globbing `sessions/*.json`.
+
+
+def tombstone_path(claude_session_id: str) -> Path:
+    directory = config_dir() / "disconnected"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return directory / f"{_safe_filename(claude_session_id)}.json"
+
+
+def session_was_disconnected(claude_session_id: str) -> bool:
+    if not claude_session_id:
+        return False
+    return bool(read_json(tombstone_path(claude_session_id)))
+
+
+def write_tombstone(claude_session_id: str) -> None:
+    try:
+        write_private_json(
+            tombstone_path(claude_session_id),
+            {"claude_session_id": claude_session_id, "disconnected_at": _now_iso()},
+        )
+    except OSError:
+        # The disconnect itself has already happened locally — the marker is gone and the
+        # wrapper is unbound. Failing to write this only costs stickiness across a later
+        # `/clear`, which is not worth failing the command the user actually ran.
+        pass
+
+
+def clear_tombstone(claude_session_id: str) -> None:
+    if not claude_session_id:
+        return
+    tombstone_path(claude_session_id).unlink(missing_ok=True)
+
+
 # -- the wrapper (W1, W3) --------------------------------------------------------------
 #
 # The return path is a process that sits *in front of* this session rather than inside it.
@@ -529,7 +583,11 @@ def unbind_wrapper(wrapper: dict, token: str | None) -> bool:
 def _print_relaunch(reason: str) -> None:
     """The one refusal left (W4). The old design had two — no channel, and a channel whose
     events were not honoured — and both meant "relaunch with the flag". There is no flag now,
-    so there is one cause and one instruction."""
+    so there is one cause and one instruction.
+
+    Rarely reached since W13: connecting is not a step anyone is told to take, so getting
+    here means someone ran this command by hand in a session that has no return path. The
+    instruction is the same, minus the "then run connect again" that is no longer true."""
     print(reason)
     print()
     print("Start Claude Code through audiochatty instead:")
@@ -537,7 +595,8 @@ def _print_relaunch(reason: str) -> None:
     print(f"    {RUN_COMMAND}")
     print()
     print("That is the same Claude Code you already use — same terminal, no plugin to load,")
-    print("no warning — with a return path attached. Then run /audiochatty-connect again.")
+    print("no warning — and it connects the session itself, so there's nothing to run after")
+    print("it.")
     print()
     print("If `audiochatty` isn't a command on this machine yet, that is one line in your")
     print("shell profile:")
@@ -553,8 +612,8 @@ def _print_nested_session() -> None:
     print("it.")
     print()
     print("Connecting it would type what you say into the outer terminal rather than this")
-    print("one, so nothing was registered. Run /audiochatty-connect in the session you")
-    print("started with `audiochatty run`.")
+    print("one, so nothing was registered. The session you started with `audiochatty run`")
+    print("is already connected — talk to that one.")
 
 
 # -- login -----------------------------------------------------------------------------
@@ -746,10 +805,10 @@ def _login_finish(response: dict, base: str) -> int:
     print()
     print(f"    {RUN_COMMAND}")
     print()
-    print("then run /audiochatty-connect there. It's the same Claude Code you already use —")
-    print("same terminal, nothing to load, no warning — with a return path attached. Under")
-    print("plain `claude` there is nothing to tell that session, and /audiochatty-connect")
-    print("refuses outright rather than registering a session you can't reach.")
+    print("That's the whole of it — it connects the session for you, so there's nothing to")
+    print("run afterwards. It's the same Claude Code you already use: same terminal, nothing")
+    print("to load, no warning, with a return path attached. A session started with plain")
+    print("`claude` has no return path, so there is nothing there to tell it what to do.")
     print()
     print("If `audiochatty` isn't a command on this machine yet, that is one line in your")
     print("shell profile:")
@@ -759,22 +818,171 @@ def _login_finish(response: dict, base: str) -> int:
 
 
 # -- connect ---------------------------------------------------------------------------
+#
+# **Three callers now, one protocol** (W13). `audiochatty run` connects the session it
+# started, `scripts/session_start_hook.py` connects the ones the wrapper could not name up
+# front (`--resume`), and `/audiochatty-connect` remains for repair — retry a connect that
+# failed while the backend was down, rename a session, reconnect one that was disconnected.
+#
+# All three go through `connect_session` below. They differ in exactly two ways: how the
+# bind happens (an in-process call for the wrapper itself, `POST /bind` over loopback for
+# the two that run inside the session) and how the outcome is reported (printed for the
+# slash command, recorded in the rendezvous file for the silent paths). The *order* —
+# register → bind → verified → marker — has one home, because the argument for it is
+# subtle and would rot in a second copy.
+
+
+class ConnectResult:
+    """What happened, in a form both a printing caller and a silent one can use.
+
+    `error` is machine-readable and is what `/audiochatty-status` turns into a cause;
+    `detail` is one human line for the same purpose. `ok` is the only thing most callers
+    check.
+    """
+
+    __slots__ = ("ok", "error", "detail", "name", "agent_session_id")
+
+    def __init__(
+        self,
+        ok: bool,
+        *,
+        error: str = "",
+        detail: str = "",
+        name: str = "",
+        agent_session_id: str = "",
+    ):
+        self.ok = ok
+        self.error = error
+        self.detail = detail
+        self.name = name
+        self.agent_session_id = agent_session_id
+
+
+def default_session_name(repo_path: str) -> str:
+    """The working directory's basename, which is how a session shows up in the inbox.
+
+    Shared so `audiochatty run --name` and `/audiochatty-connect [name]` cannot drift into
+    naming the same session two different things.
+    """
+    return os.path.basename(repo_path.rstrip("/")) or "claude-code"
+
+
+def connect_session(
+    *,
+    claude_session_id: str,
+    repo_path: str,
+    name: str,
+    token: str,
+    base_url: str,
+    bind,
+    wrapper_pid=None,
+    wrapper_port=None,
+    skip_next_turn: bool,
+) -> ConnectResult:
+    """Register this session, bind its return path, say it's reachable, open the gate.
+
+    The order is load-bearing and has not changed since the channel design: `/bind` needs
+    the `agent_sessions.id` that registration returns, `/agent/session/verified` states a
+    fact that only becomes true at the bind (W8), and the marker is the Stop hook's gate,
+    which must not open until the rest worked.
+
+    `bind` is a one-argument callable taking the `agent_session_id` and raising `ApiError`
+    or `TransportError` if it fails. That is the whole of the difference between the
+    wrapper connecting itself (an in-process `WrapperState.bind`) and something inside the
+    session connecting it (`POST /bind` on loopback) — and it is a callable rather than a
+    flag so this function never has to know which world it is in.
+
+    **`skip_next_turn` is `True` only for the slash command.** That flag exists because the
+    `/audiochatty-connect` turn's entire content is the model relaying "this session is now
+    X in audiochatty", which is not worth reading back to the person who just typed it. A
+    launch has no such turn, so on the automatic paths the session's first turn is real work
+    and must not be swallowed.
+    """
+    try:
+        response = post(
+            "/agent/session",
+            {"claude_session_id": claude_session_id, "name": name, "repo_path": repo_path},
+            token=token,
+            base_url=base_url,
+        )
+    except ApiError as exc:
+        if exc.status == 401:
+            return ConnectResult(
+                False,
+                error="revoked",
+                detail="This machine's audiochatty token was revoked.",
+            )
+        return ConnectResult(
+            False, error="rejected", detail=f"audiochatty refused the registration: {exc}"
+        )
+    except TransportError as exc:
+        return ConnectResult(
+            False, error="unreachable", detail=f"Couldn't reach audiochatty ({exc})."
+        )
+
+    registered_name = str(response.get("name") or name)
+    agent_session_id = str(response.get("session_id") or "")
+
+    try:
+        bind(agent_session_id)
+    except (ApiError, TransportError) as exc:
+        # Registration already landed, so this is the one path that has to undo something.
+        # Best effort, and the failure of the undo is survivable: what it leaves is a
+        # session with no marker, which sends nothing and reads as unreachable in the inbox
+        # — a degraded state the frontend already has somewhere to show.
+        _end_session_quietly(claude_session_id, token, base_url)
+        return ConnectResult(
+            False,
+            error="bind_failed",
+            detail=f"Couldn't connect this session's return path ({exc}).",
+        )
+
+    # W8. The bind *is* the proof of reachability, so this states it rather than proving it:
+    # there is no nonce, no injected handshake, no tool call for the model to answer, and no
+    # retry loop here. Failure is not fatal and deliberately not reported — the wrapper
+    # retries this from its own poll loop, so the cost of losing the call is that the phone
+    # shows this session as unreachable for a few seconds.
+    _mark_verified_quietly(claude_session_id, token, base_url)
+
+    marker = {
+        "claude_session_id": claude_session_id,
+        # The backend's uuid for the registration, kept for /audiochatty-status and for
+        # debugging a message that arrived under the wrong name.
+        "session_id": response.get("session_id"),
+        "name": registered_name,
+        "repo_path": repo_path,
+        "registered_at": _now_iso(),
+        # Which wrapper process this session was bound to. `/audiochatty-disconnect`
+        # unbinds by rendezvous file rather than by this, so it is here to make a
+        # confusing session debuggable, not to be trusted — a pid is reused eventually.
+        "wrapper_pid": wrapper_pid,
+        "wrapper_port": wrapper_port,
+    }
+    if skip_next_turn:
+        marker["skip_next_turn"] = True
+    write_private_json(marker_path(claude_session_id), marker)
+    reset_breaker()
+    return ConnectResult(
+        True, name=registered_name, agent_session_id=agent_session_id
+    )
 
 
 def cmd_connect(args: argparse.Namespace) -> int:
-    """Register this session, and bind the wrapper that lets it be talked to.
+    """`/audiochatty-connect` — the repair tool (W13).
 
     Deterministic by design (D1): read the session id, find the wrapper, POST, write a
     marker. Nothing here is a judgment call, which is why it is a slash command and not a
     skill — routing it through the model means it can be paraphrased, skipped, or done
     twice.
 
-    **The wrapper is checked before anything is registered** (W4, unchanged from R1). Both
-    refusals below are local and cost nothing, and taking them first is what keeps a refused
-    `connect` from leaving a live session row behind. The order after that is registration →
-    bind → verified → marker: `/bind` needs the `agent_sessions.id` that registration
-    returns, `/agent/session/verified` states a fact that only becomes true at the bind
-    (W8), and the marker is the Stop hook's gate, which must not open until the rest worked.
+    **This is no longer the way sessions get connected.** `audiochatty run` does that
+    itself, so what is left here are the three cases it cannot cover: a connect that failed
+    because the backend was down at launch, a rename, and reconnecting a session that was
+    deliberately disconnected. All three are worth not having to restart Claude Code for.
+
+    **The wrapper is still checked before anything is registered** (W4, unchanged from R1).
+    Both refusals below are local and cost nothing, and taking them first is what keeps a
+    refused `connect` from leaving a live session row behind.
     """
     token = device_token()
     if not token:
@@ -787,7 +995,8 @@ def cmd_connect(args: argparse.Namespace) -> int:
         return 1
 
     repo_path = args.cwd or os.getcwd()
-    name = (args.name or "").strip() or os.path.basename(repo_path.rstrip("/")) or "claude-code"
+    asked_for_name = bool((args.name or "").strip())
+    name = (args.name or "").strip() or default_session_name(repo_path)
 
     wrapper, problem = find_wrapper(claude_session_id)
     if problem == "session_mismatch":
@@ -800,82 +1009,54 @@ def cmd_connect(args: argparse.Namespace) -> int:
         )
         return 1
 
-    try:
-        response = post(
-            "/agent/session",
-            {"claude_session_id": claude_session_id, "name": name, "repo_path": repo_path},
-            token=token,
-            base_url=backend_url(args.backend_url),
-        )
-    except ApiError as exc:
-        if exc.status == 401:
-            print(
-                "This machine's audiochatty token was revoked. "
-                "Run /audiochatty-login to pair again."
-            )
-            return 1
-        print(f"Couldn't register this session: {exc}")
-        return 1
-    except TransportError as exc:
-        print(f"Couldn't reach audiochatty ({exc}). This session is not registered.")
-        return 1
+    # The likely case now, and one this command never had to handle while connecting was a
+    # required step. Re-registering a working session would be harmless but pointless — so
+    # say so instead, *unless* a name was asked for, since renaming is one of the three
+    # reasons to run this at all.
+    marker = load_marker(claude_session_id)
+    already_bound = str(wrapper.get("claude_session_id") or "") == claude_session_id
+    if marker and already_bound and not asked_for_name:
+        print(f'This session is already connected as "{marker.get("name")}".')
+        print("You can hear what it does, and tell it what to do next, from audiochatty.")
+        return 0
 
-    registered_name = response.get("name") or name
-    agent_session_id = str(response.get("session_id") or "")
-
-    try:
-        bind_wrapper(
+    result = connect_session(
+        claude_session_id=claude_session_id,
+        repo_path=repo_path,
+        name=name,
+        token=token,
+        base_url=backend_url(args.backend_url),
+        bind=lambda agent_session_id: bind_wrapper(
             wrapper,
             agent_session_id=agent_session_id,
             claude_session_id=claude_session_id,
             base=backend_url(args.backend_url),
             token=token,
-            name=registered_name,
-        )
-    except (ApiError, TransportError) as exc:
-        # Registration already landed, so this is the one path that has to undo something.
-        # Best effort, and the failure of the undo is survivable: what it leaves is a
-        # session with no marker, which sends nothing and reads as unreachable in the inbox
-        # — a degraded state the frontend already has somewhere to show.
-        _end_session_quietly(claude_session_id, token, args.backend_url)
-        print(f"Couldn't connect this session's audiochatty return path ({exc}).")
-        print("Nothing was registered. Try /audiochatty-connect again; if it keeps failing,")
-        print(f"exit and start the session again with `{RUN_COMMAND}`.")
+            name=name,
+        ),
+        wrapper_pid=wrapper.get("pid"),
+        wrapper_port=wrapper.get("port"),
+        skip_next_turn=True,
+    )
+
+    if not result.ok:
+        if result.error == "revoked":
+            print("This machine's audiochatty token was revoked. ")
+            print("Run /audiochatty-login to pair again.")
+            return 1
+        if result.error == "bind_failed":
+            print(result.detail)
+            print("Nothing was registered. Try /audiochatty-connect again; if it keeps failing,")
+            print(f"exit and start the session again with `{RUN_COMMAND}`.")
+            return 1
+        print(result.detail)
+        print("This session is not registered.")
         return 1
 
-    # W8. The bind *is* the proof of reachability, so this states it rather than proving it:
-    # there is no nonce, no injected handshake, no tool call for the model to answer, and no
-    # retry loop here. Failure is not fatal and deliberately not reported — the wrapper
-    # retries this from its own poll loop, so the cost of losing the call is that the phone
-    # shows this session as unreachable for a few seconds.
-    _mark_verified_quietly(claude_session_id, token, args.backend_url)
-
-    write_private_json(
-        marker_path(claude_session_id),
-        {
-            "claude_session_id": claude_session_id,
-            # The backend's uuid for the registration, kept for /audiochatty-status and for
-            # debugging a message that arrived under the wrong name.
-            "session_id": response.get("session_id"),
-            "name": registered_name,
-            "repo_path": repo_path,
-            "registered_at": _now_iso(),
-            # Which wrapper process this session was bound to. `/audiochatty-disconnect`
-            # unbinds by rendezvous file rather than by this, so it is here to make a
-            # confusing session debuggable, not to be trusted — a pid is reused eventually.
-            "wrapper_pid": wrapper.get("pid"),
-            "wrapper_port": wrapper.get("port"),
-            # This very turn ends with the model relaying the line printed below, and the
-            # marker it would be checked against already exists. `consume_skip_next_turn`
-            # spends this on that turn so registration itself is never a message.
-            #
-            # It used to cover the channel handshake's turn as well. There is no handshake
-            # now (W8), so it is back to covering exactly what its name says.
-            "skip_next_turn": True,
-        },
-    )
-    reset_breaker()
-    print(f'This session is now "{registered_name}" in audiochatty.')
+    # An explicit reconnect is the one thing that overrides a `disconnect` (W13): the user
+    # is asking for it by name, where a hook firing after a `/clear` is not.
+    clear_tombstone(claude_session_id)
+    print(f'This session is now "{result.name}" in audiochatty.')
     print("You can hear what it does, and tell it what to do next, from audiochatty.")
     return 0
 
@@ -903,6 +1084,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     if marker:
         print(f'This session is registered as "{marker.get("name")}".')
         print("Every turn you finish here is sent to audiochatty.")
+    elif session_was_disconnected(claude_session_id):
+        # Distinguished from "never connected" because the fix is different and because a
+        # user who ran /audiochatty-disconnect should be told it held rather than left
+        # wondering whether it worked.
+        print("This session was disconnected — nothing from it is being sent, and it stays")
+        print("that way for the rest of the session. Run /audiochatty-connect to undo that.")
     else:
         print("This session is NOT registered — nothing from it is being sent.")
         print("Run /audiochatty-connect [name] to start.")
@@ -929,6 +1116,11 @@ def _print_wrapper_status(claude_session_id: str, *, registered: bool) -> None:
     There is one fewer cause to name than there used to be: the old "connected but
     unconfirmed because no flag was passed" case cannot happen, since verification is now
     set at bind time rather than proven on a later turn (W8).
+
+    **After W13 this command carries more weight than it used to.** Connecting happens at
+    launch and prints nothing, so success and failure look identical in the terminal — this
+    is the only place a failed connect surfaces at all. The wrapper writes why it failed
+    into its rendezvous file precisely so this function can say it out loud.
     """
     wrapper, problem = find_wrapper(claude_session_id)
 
@@ -941,6 +1133,13 @@ def _print_wrapper_status(claude_session_id: str, *, registered: bool) -> None:
         print("This session has no audiochatty return path, so it can't be told what to do")
         print("next. Exit it and start Claude Code with:")
         print(f"    {RUN_COMMAND}")
+        return
+
+    # W13: the launch tried to connect and failed, silently, because there is nowhere on a
+    # TUI's screen for it to have said so. This is where that reason comes out.
+    connect_error = str(wrapper.get("connect_error") or "")
+    if connect_error and not registered:
+        print(_connect_error_line(connect_error))
         return
 
     # The `claude_session_id` guard matters: without it an *unbound* wrapper (whose
@@ -970,6 +1169,36 @@ def _print_wrapper_status(claude_session_id: str, *, registered: bool) -> None:
     # status command that prints nothing at all about the half the user asked about.
     print("Its audiochatty return path is connected but not confirmed, so audiochatty will")
     print("say this session can't be talked to. Run /audiochatty-connect again.")
+
+
+def _connect_error_line(error: str) -> str:
+    """One line per `ConnectResult.error`, ending in what to do about it.
+
+    Kept as a mapping here rather than storing the human sentence in the rendezvous file:
+    the file records *what happened*, and the advice for it belongs with the command that
+    gives advice. A code this doesn't know about still produces something honest.
+    """
+    if error == "revoked":
+        return (
+            "This session tried to connect at launch and audiochatty rejected the "
+            "machine's token.\nRun /audiochatty-login to pair again, then "
+            "/audiochatty-connect."
+        )
+    if error == "unreachable":
+        return (
+            "This session tried to connect at launch and couldn't reach audiochatty, so it\n"
+            "can't be talked to. Run /audiochatty-connect to try again — the session doesn't\n"
+            "need restarting."
+        )
+    if error == "bind_failed":
+        return (
+            "This session's return path didn't connect at launch, so it can't be talked to.\n"
+            "Run /audiochatty-connect to try again."
+        )
+    return (
+        "This session tried to connect at launch and didn't manage it "
+        f"({error}).\nRun /audiochatty-connect to try again."
+    )
 
 
 def _other_registered_sessions(claude_session_id: str) -> list[str]:
@@ -1003,6 +1232,13 @@ def cmd_disconnect(args: argparse.Namespace) -> int:
     cannot fail in a way that matters, and it stops the *other* direction — a wrapper that
     stays bound keeps polling for instructions addressed to a session the user has just
     closed, and would type one into this terminal.
+
+    **The tombstone is third, and it is what makes this stick** (W13). Connecting is
+    automatic now, and `SessionStart` fires again on `/clear` in the same session — so
+    without a record that the user closed this one, a `/clear` a minute later would quietly
+    reconnect it. Written after the local teardown because it is the least urgent part: its
+    absence costs stickiness across a later `/clear`, while a marker left in place would
+    keep sending turns right now.
     """
     claude_session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not claude_session_id:
@@ -1024,6 +1260,8 @@ def cmd_disconnect(args: argparse.Namespace) -> int:
     for wrapper in read_wrappers():
         if str(wrapper.get("claude_session_id") or "") == claude_session_id:
             unbind_wrapper(wrapper, token)
+
+    write_tombstone(claude_session_id)
 
     if not marker:
         print("This session wasn't registered with audiochatty.")
