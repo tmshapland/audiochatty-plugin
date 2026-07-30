@@ -3,7 +3,7 @@
   "name": "audiochatty",
   "displayName": "audiochatty",
   "version": "0.1.0",
-  "description": "Talk to a Claude Code session from your phone. Each completed turn becomes a short spoken summary you can listen to from anywhere, and what you say back is delivered into the running session as a prompt.",
+  "description": "Talk to a Claude Code session from your phone. Each completed turn becomes a short spoken summary you can listen to from anywhere, and what you say back is typed into the running session as a prompt. Start sessions with `audiochatty run` for the second half.",
   "author": {
     "name": "Tom Shapland",
     "url": "https://github.com/tmshapland"
@@ -14,7 +14,6 @@
   "keywords": [
     "audiochatty",
     "voice",
-    "channel",
     "notifications",
     "summaries"
   ]

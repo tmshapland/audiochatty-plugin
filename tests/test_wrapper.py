@@ -1,6 +1,9 @@
 """`audiochatty run`, driven the way a person drives it.
 
-`wrapper_return_path_plan.md` Phase 1. The successor to `tests/test_channel.py`.
+`wrapper_return_path_plan.md` Phase 1. The successor to `tests/test_channel.py`, which
+Phase 4 deleted along with the channel it drove — everything that file asserted about
+behaviour the wrapper still has is asserted here instead, and Phase 4's as-built note in
+the plan is the map from one to the other.
 
 Every test here starts the **real wrapper as a subprocess**, with a **real pty for its own
 stdin** and a **fake `claude`** inside it, and asserts on bytes that actually reached that
@@ -22,6 +25,7 @@ human at a keyboard; see `wrapper/README.md`.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import signal
@@ -36,8 +40,11 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from wrapper import inject  # noqa: E402
+from stub_backend import StubBackend  # noqa: E402
+
+from wrapper import inject, poller  # noqa: E402
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 WRAPPER = PLUGIN_ROOT / "wrapper" / "__main__.py"
@@ -47,6 +54,38 @@ TOKEN = "device-token-for-tests"
 # Short enough to keep the suite quick, long enough that "held back" and "let through" are
 # not the same measurement.
 QUIET_PERIOD = 0.6
+
+# Phase 2's cadences, compressed. The real numbers are 5s / 30s / 60s and a suite that used
+# them would take twenty minutes; what the tests actually assert on is the *shape* — that a
+# failure backs off far longer than a success, that an empty answer is cheap, that nothing
+# spins. See `poller._tunable`.
+POLL = {
+    "AUDIOCHATTY_POLL_ACTIVE": "0.1",
+    "AUDIOCHATTY_POLL_IDLE": "0.3",
+    "AUDIOCHATTY_POLL_COOLDOWN": "1.0",
+    "AUDIOCHATTY_POLL_TIMEOUT": "3.0",
+}
+
+# Ids are uuids in production (the backend rejects anything else on the ack path), so they
+# are uuids here too.
+MSG_ID = "55555555-5555-5555-5555-555555555555"
+OTHER_MSG_ID = "66666666-6666-6666-6666-666666666666"
+AGENT_SESSION = "33333333-3333-3333-3333-333333333333"
+
+_names = itertools.count()
+
+
+def one_message(text: str = "run the tests", message_id: str = MSG_ID) -> dict:
+    return {
+        "messages": [
+            {
+                "id": message_id,
+                "text": text,
+                "sender_name": "Mike",
+                "created_at": "2026-07-29T10:00:00Z",
+            }
+        ]
+    }
 
 # A fake `claude`: raw-modes its tty like the real TUI does, appends everything it is given
 # to a log, and exits with a code the test chooses so exit-code passthrough is observable.
@@ -90,12 +129,17 @@ class WrappedSession:
     """
 
     def __init__(self, home: Path, *, exit_code: int = 0, quiet_period: float = QUIET_PERIOD,
-                 extra_args: list[str] | None = None, launcher: bool = False):
+                 extra_args: list[str] | None = None, launcher: bool = False,
+                 poll: dict | None = None):
         import pty
 
+        # Per-session names, because the restart test in `TestDelivery` runs two wrappers
+        # against the same `AUDIOCHATTY_HOME` — one shared log would make "the second
+        # session never saw it" unprovable.
+        tag = next(_names)
         self.home = home
-        self.log = home / "child.log"
-        self.claude = home / "fakeclaude"
+        self.log = home / f"child-{tag}.log"
+        self.claude = home / f"fakeclaude-{tag}"
         self.claude.write_text(FAKE_CLAUDE.format(python=sys.executable))
         self.claude.chmod(0o755)
 
@@ -104,7 +148,9 @@ class WrappedSession:
             AUDIOCHATTY_HOME=str(home),
             FAKE_CLAUDE_LOG=str(self.log),
             FAKE_CLAUDE_EXIT=str(exit_code),
+            **POLL,
         )
+        env.update(poll or {})
         env.pop("AUDIOCHATTY_DEBUG", None)
 
         argv = [str(LAUNCHER)] if launcher else [sys.executable, str(WRAPPER)]
@@ -121,6 +167,8 @@ class WrappedSession:
         # is not a faithful one — it fills the pty's output buffer and the wrapper blocks
         # writing into a screen nobody is looking at. This thread is the terminal.
         self._screen = bytearray()
+        self._reading = True
+        self._closed = False
         self._reader = threading.Thread(target=self._drain_screen, daemon=True)
         self._reader.start()
 
@@ -179,14 +227,20 @@ class WrappedSession:
 
     def bind(self, **overrides) -> tuple[int, dict]:
         body = {
-            "agent_session_id": "agent-session-1",
+            "agent_session_id": AGENT_SESSION,
             "claude_session_id": self.session_id,
+            # Deliberately unreachable by default: a test that has not asked to talk to a
+            # backend must not have its poll loop reach one.
             "backend_url": "http://127.0.0.1:1/",
             "token": TOKEN,
             "session_name": "laptop",
         }
         body.update(overrides)
         return self.call("/bind", body)
+
+    @property
+    def ledger(self) -> Path:
+        return self.home / "wrappers" / f"{self.record['claude_session_id']}.delivered.json"
 
     def type(self, data: bytes) -> None:
         """Type on the keyboard, for real, into the wrapper's own terminal."""
@@ -203,7 +257,26 @@ class WrappedSession:
         return bytes(self._screen)
 
     def _drain_screen(self) -> None:
-        while True:
+        """Poll rather than block, and stop when `stop()` says so.
+
+        A blocking `os.read` here would be simpler and is what this was, but it is two
+        hazards at once and both of them cost an afternoon. On macOS, `os.close` of a pty
+        master **blocks** while another thread is inside a read on it — so teardown hung.
+        And a read left blocked on a closed fd is a read on whatever fd number gets handed
+        out next, which in a test that starts two sessions is the *next session's* pty:
+        keystrokes meant for the second wrapper vanish into a thread belonging to the first.
+        Neither reads like a fixture bug from the outside; the first looks like a wrapper
+        that will not exit and the second like a wrapper that drops input.
+        """
+        import select
+
+        while self._reading:
+            try:
+                ready, _, _ = select.select([self.stdin_master], [], [], 0.05)
+            except (OSError, ValueError):
+                return
+            if not ready:
+                continue
             try:
                 data = os.read(self.stdin_master, 65536)
             except OSError:
@@ -230,10 +303,22 @@ class WrappedSession:
             except subprocess.TimeoutExpired:  # pragma: no cover
                 self.proc.kill()
                 self.proc.wait(timeout=5)
-        try:
-            os.close(self.stdin_master)
-        except OSError:
-            pass
+        # The reader first, then the fd. See `_drain_screen` for why that order is not
+        # optional.
+        self._reading = False
+        self._reader.join(timeout=2)
+        # **Exactly once**, which is why the flag exists rather than a bare `try/except
+        # OSError`. `stop()` is called twice on any session a test stops itself, since
+        # `tearDown` stops them all again — and a second `os.close` of that number is not a
+        # harmless `EBADF` once another `pty.openpty()` has been handed the same number. It
+        # closes *that* session's terminal, and the symptom is the next wrapper in the suite
+        # ignoring every keystroke and having to be killed after a 10-second wait.
+        if not self._closed:
+            self._closed = True
+            try:
+                os.close(self.stdin_master)
+            except OSError:
+                pass
         if self.proc.stderr:
             self.proc.stderr.close()
         return self.proc.returncode
@@ -273,8 +358,11 @@ class TestRendezvous(WrapperTestCase):
         self.assertNotEqual(record["child_pid"], session.proc.pid)
         self.assertTrue(record["expected_session_id"])
 
-        # 0600, and the token is not in here.
+        # 0600, in a 0700 directory, and the token is not in here. (The directory mode came
+        # over from `test_channel.py` in Phase 4: the ledgers live beside these files, and
+        # the whole point of the token check is that neither is worth reading.)
         self.assertEqual(session.rendezvous.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(session.rendezvous.parent.stat().st_mode & 0o777, 0o700)
         self.assertNotIn(TOKEN, session.rendezvous.read_text())
 
     def test_wrapper_env_reaches_the_child(self):
@@ -532,6 +620,248 @@ class TestInjection(WrapperTestCase):
         self.assertEqual(session.call("/status", method="GET")[1]["pending_injections"], 1)
 
 
+class TestDelivery(WrapperTestCase):
+    """Phase 2: a message sitting in the backend queue ends up typed into the session.
+
+    Every test here runs the real poll loop against `tests/stub_backend.py` — the same stub
+    the old channel's tests used, speaking the same three routes, which is W10 demonstrated
+    rather than asserted: nothing about the queue changed when the delivery mechanism did.
+    """
+
+    def test_a_queued_message_is_typed_once_and_acked_once(self):
+        with StubBackend() as backend:
+            backend.reply("/agent/inbound", 200, one_message())
+            session = self.start()
+            session.bind(backend_url=backend.url)
+
+            saw = wait_for(lambda: b"\x1b[200~" in session.child_saw() and session.child_saw())
+            self.assertIn(b"run the tests", saw)
+
+            acks = wait_for(lambda: backend.requests_to("/agent/inbound/ack"))
+            self.assertEqual(acks[0]["body"]["message_ids"], [MSG_ID])
+            self.assertEqual(acks[0]["authorization"], f"Bearer {TOKEN}")
+
+            # The poll names the session it was bound to, and nothing else.
+            polls = backend.requests_to("/agent/inbound")
+            self.assertEqual(polls[0]["query"], {"session_id": AGENT_SESSION})
+            self.assertEqual(polls[0]["method"], "GET")
+
+            # Keep polling for several more rounds; it must not type it again or ack again.
+            time.sleep(0.5)
+            self.assertGreater(len(backend.requests_to("/agent/inbound")), 2)
+            self.assertEqual(session.child_saw().count(b"\x1b[200~"), 1)
+            self.assertEqual(len(backend.requests_to("/agent/inbound/ack")), 1)
+
+    def test_the_ledger_is_written_before_the_ack(self):
+        """W9's order, from the outside: the file that prevents a duplicate exists by the
+        time the backend is told anything."""
+        with StubBackend() as backend:
+            backend.reply("/agent/inbound", 200, one_message())
+            session = self.start()
+            session.bind(backend_url=backend.url)
+            wait_for(lambda: backend.requests_to("/agent/inbound/ack"))
+
+            ledger = self.home / "wrappers" / f"{session.session_id}.delivered.json"
+            self.assertTrue(ledger.exists())
+            self.assertEqual(json.loads(ledger.read_text())["message_ids"], [MSG_ID])
+            self.assertEqual(ledger.stat().st_mode & 0o777, 0o600)
+
+    def test_a_multi_line_message_arrives_as_a_single_paste(self):
+        """W5 on the path that matters: not `/inject` by hand, but a message that came off
+        the backend queue the way a spoken instruction really does."""
+        with StubBackend() as backend:
+            backend.reply(
+                "/agent/inbound",
+                200,
+                one_message("first paragraph, line one\nline two\n\nsecond paragraph"),
+            )
+            session = self.start()
+            session.bind(backend_url=backend.url)
+
+            saw = wait_for(lambda: b"\x1b[201~" in session.child_saw() and session.child_saw())
+            self.assertEqual(saw.count(b"\x1b[200~"), 1)
+            self.assertEqual(saw.count(b"\x1b[201~"), 1)
+            body = saw.split(b"\x1b[200~", 1)[1].split(b"\x1b[201~", 1)[0]
+            self.assertEqual(
+                body, b"first paragraph, line one\rline two\r\rsecond paragraph"
+            )
+            self.assertTrue(saw.endswith(b"\x1b[201~\r"))
+
+    def test_a_failed_ack_is_retried_without_a_second_injection(self):
+        with StubBackend() as backend:
+            backend.reply("/agent/inbound", 200, one_message())
+            backend.reply("/agent/inbound/ack", 500, {"error": "nope"})
+            session = self.start()
+            session.bind(backend_url=backend.url)
+
+            acks = wait_for(lambda: len(backend.requests_to("/agent/inbound/ack")) >= 2
+                            and backend.requests_to("/agent/inbound/ack"))
+            self.assertTrue(acks)
+            self.assertEqual(acks[1]["body"]["message_ids"], [MSG_ID])
+            # A failed ack is bookkeeping, not delivery: the instruction is already in the
+            # terminal, so it must not go in again and the poll must not stop.
+            self.assertEqual(session.child_saw().count(b"\x1b[200~"), 1)
+
+    def test_no_duplicate_across_a_restart(self):
+        """W9's actual requirement. The ledger is keyed by Claude Code session rather than
+        by pid precisely so that it is *not* empty here, which is the one moment it matters.
+        """
+        with StubBackend() as backend:
+            backend.reply("/agent/inbound", 200, one_message())
+            first = self.start()
+            first.bind(backend_url=backend.url)
+            wait_for(lambda: backend.requests_to("/agent/inbound/ack"))
+            self.assertIn(b"run the tests", first.child_saw())
+            session_id = first.session_id
+            first.stop()
+
+            # The backend serves it again — an ack that was lost in flight, or a session
+            # that was revived. A new process, a new pid, the same conversation.
+            backend.reply("/agent/inbound", 200, one_message())
+            second = self.start(extra_args=["--", "--session-id", session_id])
+            self.assertIsNone(second.record["expected_session_id"])
+            second.bind(claude_session_id=session_id, backend_url=backend.url)
+
+            wait_for(lambda: len(backend.requests_to("/agent/inbound/ack")) >= 2)
+            # Re-acked, so the backend stops serving it — but never re-typed.
+            self.assertNotIn(b"\x1b[200~", second.child_saw())
+            self.assertNotIn(b"run the tests", second.child_saw())
+            self.assertEqual(
+                backend.requests_to("/agent/inbound/ack")[-1]["body"]["message_ids"], [MSG_ID]
+            )
+
+    def test_a_backend_answering_with_errors_backs_off_instead_of_spinning(self):
+        """The circuit breaker, ported whole. A sleeping Render service is an outage measured
+        in hours, and a 5-second loop through it is a request every 5 seconds for hours."""
+        with StubBackend() as backend:
+            for _ in range(200):
+                backend.reply("/agent/inbound", 500, {"error": "asleep"})
+            session = self.start(poll={"AUDIOCHATTY_POLL_ACTIVE": "0.02",
+                                      "AUDIOCHATTY_POLL_COOLDOWN": "1.5"})
+            session.bind(backend_url=backend.url)
+
+            wait_for(lambda: backend.requests_to("/agent/inbound"))
+            time.sleep(1.0)
+            # At a 0.02s active interval this would be ~50 requests. With the cooldown it is
+            # one, and the assertion is deliberately loose about the exact number.
+            attempts = len(backend.requests_to("/agent/inbound"))
+            self.assertLessEqual(attempts, 3, f"{attempts} requests — the breaker is not holding")
+
+    def test_a_backend_that_is_not_there_at_all_is_invisible_to_the_user(self):
+        """Rule 2 of the whole project, applied here: a backend that is down must never be
+        something the person in the terminal has to notice."""
+        session = self.start(poll={"AUDIOCHATTY_POLL_ACTIVE": "0.05",
+                                   "AUDIOCHATTY_POLL_COOLDOWN": "0.2"})
+        session.bind(backend_url="http://127.0.0.1:1")
+        time.sleep(0.6)
+
+        self.assertIsNone(session.proc.poll(), "the wrapper died on an unreachable backend")
+        screen = session.screen()
+        self.assertNotIn(b"Traceback", screen)
+        self.assertNotIn(b"127.0.0.1:1", screen)
+        self.assertNotIn(b"Connection refused", screen)
+        # And the terminal still works, which is the property that actually matters.
+        session.type(b"still typing")
+        self.assertTrue(wait_for(lambda: b"still typing" in session.child_saw()))
+
+    def test_an_unbound_wrapper_makes_no_network_calls(self):
+        """The "costs nothing until connected" property the old channel had, measured rather
+        than assumed. A wrapper has no backend URL until something binds it, so this is true
+        by construction — and worth a test precisely because a later change could make it
+        false without anyone noticing."""
+        with StubBackend() as backend:
+            session = self.start(poll={"AUDIOCHATTY_POLL_ACTIVE": "0.02"})
+            self.assertFalse(session.call("/status", method="GET")[1]["polling"])
+            time.sleep(0.4)
+            self.assertEqual(backend.requests, [])
+
+            # And it starts the moment it is bound, with no handshake in between.
+            session.bind(backend_url=backend.url)
+            self.assertTrue(wait_for(lambda: backend.requests_to("/agent/inbound")))
+            self.assertTrue(session.call("/status", method="GET")[1]["polling"])
+
+    def test_unbinding_stops_the_poll_loop(self):
+        with StubBackend() as backend:
+            session = self.start()
+            session.bind(backend_url=backend.url)
+            wait_for(lambda: backend.requests_to("/agent/inbound"))
+            session.call("/unbind", {"token": TOKEN})
+
+            # It exits at its next tick, not at the end of a 30-second sleep.
+            self.assertTrue(wait_for(
+                lambda: not session.call("/status", method="GET")[1]["polling"], timeout=3
+            ))
+            settled = len(backend.requests_to("/agent/inbound"))
+            time.sleep(0.4)
+            self.assertEqual(len(backend.requests_to("/agent/inbound")), settled)
+
+    def test_verification_is_reported_and_retried_until_it_lands(self):
+        """W8's loose end. The phone-side inbox reads `channel_verified_at` directly, so a
+        reachable session the backend never heard about is one the user is wrongly told they
+        cannot talk to."""
+        with StubBackend() as backend:
+            backend.reply("/agent/session/verified", 500, {"error": "nope"})
+            session = self.start()
+            session.bind(backend_url=backend.url)
+
+            posts = wait_for(lambda: len(backend.requests_to("/agent/session/verified")) >= 2
+                             and backend.requests_to("/agent/session/verified"))
+            self.assertTrue(posts)
+            self.assertEqual(posts[0]["body"], {"claude_session_id": session.session_id})
+
+            # It stops once the backend confirms, rather than posting forever.
+            time.sleep(0.5)
+            self.assertEqual(len(backend.requests_to("/agent/session/verified")), 2)
+
+    def test_a_caller_that_already_reported_verification_is_not_second_guessed(self):
+        with StubBackend() as backend:
+            session = self.start()
+            session.bind(backend_url=backend.url, verified_reported=True)
+            wait_for(lambda: len(backend.requests_to("/agent/inbound")) >= 3)
+            self.assertEqual(backend.requests_to("/agent/session/verified"), [])
+
+    def test_a_malformed_row_never_becomes_a_keystroke(self):
+        with StubBackend() as backend:
+            backend.reply("/agent/inbound", 200, {"messages": [
+                {"text": "no id, so it cannot be deduped"},
+                {"id": OTHER_MSG_ID, "text": "   "},
+                "not even an object",
+                {"id": MSG_ID, "text": "this one is real"},
+            ]})
+            session = self.start()
+            session.bind(backend_url=backend.url)
+
+            saw = wait_for(lambda: b"\x1b[201~" in session.child_saw() and session.child_saw())
+            self.assertEqual(saw.count(b"\x1b[200~"), 1)
+            self.assertIn(b"this one is real", saw)
+            self.assertNotIn(b"cannot be deduped", saw)
+            acks = wait_for(lambda: backend.requests_to("/agent/inbound/ack"))
+            self.assertEqual(acks[0]["body"]["message_ids"], [MSG_ID])
+
+    def test_the_quiet_period_still_applies_to_a_message_off_the_queue(self):
+        """W6 and W9 together, which is the interaction the port had to get right: the ack
+        follows the *typing*, not the fetching, so a message held back because the user is
+        mid-sentence is not yet marked delivered anywhere."""
+        with StubBackend() as backend:
+            backend.reply("/agent/inbound", 200, one_message("spoken while you were typing"))
+            session = self.start(quiet_period=2.0)
+            session.bind(backend_url=backend.url)
+
+            deadline = time.monotonic() + 1.2
+            while time.monotonic() < deadline:
+                session.type(b"x")
+                time.sleep(0.1)
+            # Fetched, held, and — the part that matters — not acked and not in the ledger.
+            self.assertNotIn(b"\x1b[200~", session.child_saw())
+            self.assertEqual(backend.requests_to("/agent/inbound/ack"), [])
+            ledger = self.home / "wrappers" / f"{session.session_id}.delivered.json"
+            self.assertFalse(ledger.exists())
+
+            # Stop typing: it lands, and only then is it acked.
+            self.assertTrue(wait_for(lambda: b"\x1b[200~" in session.child_saw(), timeout=5))
+            self.assertTrue(wait_for(lambda: backend.requests_to("/agent/inbound/ack")))
+
+
 class TestTerminalBehaviour(WrapperTestCase):
     def test_keystrokes_arrive_without_waiting_for_enter(self):
         """Raw mode, observed rather than asserted about: an unnewlined keystroke reaching the
@@ -625,6 +955,87 @@ class TestSanitizer(unittest.TestCase):
 
     def test_encoding_is_a_paste_plus_one_enter(self):
         self.assertEqual(inject.encode_paste("a\nb"), b"\x1b[200~a\rb\x1b[201~\r")
+
+
+class TestParseInbound(unittest.TestCase):
+    """`poller.parse_inbound`, the other part worth testing on its own, because it is the
+    boundary between "the backend said something" and "we type into a terminal"."""
+
+    def test_both_response_shapes(self):
+        row = {"id": "a", "text": "hi", "sender_name": "Mike", "created_at": "now"}
+        self.assertEqual(poller.parse_inbound({"messages": [row]}), [row])
+        self.assertEqual(poller.parse_inbound([row]), [row])
+
+    def test_anything_unusable_is_dropped(self):
+        for payload in ({}, None, "nope", {"messages": "nope"}, [None, 3, "x"]):
+            self.assertEqual(poller.parse_inbound(payload), [])
+        self.assertEqual(poller.parse_inbound({"messages": [{"text": "no id"}]}), [])
+        self.assertEqual(poller.parse_inbound({"messages": [{"id": "x", "text": " \n "}]}), [])
+
+    def test_fields_are_capped(self):
+        parsed = poller.parse_inbound({"messages": [{
+            "id": "a" * 400,
+            "text": "t" * (inject.MAX_CONTENT_CHARS + 100),
+            "sender_name": "n" * 400,
+            "created_at": "c" * 400,
+        }]})
+        self.assertEqual(len(parsed[0]["id"]), poller.MAX_ID_CHARS)
+        self.assertEqual(len(parsed[0]["text"]), inject.MAX_CONTENT_CHARS)
+        self.assertEqual(len(parsed[0]["sender_name"]), poller.MAX_SENDER_CHARS)
+        self.assertEqual(len(parsed[0]["created_at"]), poller.MAX_CREATED_AT_CHARS)
+
+    def test_missing_optional_fields_become_empty_strings(self):
+        parsed = poller.parse_inbound({"messages": [{"id": "a", "text": "hi"}]})
+        self.assertEqual(parsed[0]["sender_name"], "")
+        self.assertEqual(parsed[0]["created_at"], "")
+
+
+class TestDeliveredLedger(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._previous = os.environ.get("AUDIOCHATTY_HOME")
+        os.environ["AUDIOCHATTY_HOME"] = self._tmp.name
+
+    def tearDown(self) -> None:
+        if self._previous is None:
+            os.environ.pop("AUDIOCHATTY_HOME", None)
+        else:
+            os.environ["AUDIOCHATTY_HOME"] = self._previous
+        self._tmp.cleanup()
+
+    def test_it_survives_being_reopened(self):
+        ledger = poller.DeliveredLedger("session-one")
+        ledger.add("a")
+        ledger.add("a")  # twice is once
+        ledger.persist()
+
+        reopened = poller.DeliveredLedger("session-one")
+        self.assertIn("a", reopened)
+        self.assertNotIn("b", reopened)
+        self.assertEqual(reopened.ids, ["a"])
+        # A different session is a different ledger.
+        self.assertNotIn("a", poller.DeliveredLedger("session-two"))
+
+    def test_it_is_capped_at_the_most_recent_ids(self):
+        ledger = poller.DeliveredLedger("session-one")
+        for index in range(poller.MAX_DELIVERED_IDS + 50):
+            ledger.add(str(index))
+        ledger.persist()
+
+        reopened = poller.DeliveredLedger("session-one")
+        self.assertEqual(len(reopened.ids), poller.MAX_DELIVERED_IDS)
+        self.assertIn(str(poller.MAX_DELIVERED_IDS + 49), reopened)
+        self.assertNotIn("0", reopened)
+
+    def test_a_session_id_cannot_escape_the_directory(self):
+        ledger = poller.DeliveredLedger("../../etc/passwd")
+        self.assertEqual(ledger.path.parent.name, "wrappers")
+        self.assertNotIn("..", ledger.path.name)
+
+    def test_a_corrupt_file_reads_as_empty(self):
+        ledger = poller.DeliveredLedger("session-one")
+        ledger.path.write_text("{not json")
+        self.assertEqual(poller.DeliveredLedger("session-one").ids, [])
 
 
 if __name__ == "__main__":

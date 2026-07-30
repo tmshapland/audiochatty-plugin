@@ -11,5 +11,6 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/audiochat.py" disconnect --session-id "${
 ```
 
 Relay the one line above and stop. This session no longer sends anything to audiochatty and
-no longer receives anything from it; the machine is still paired, so `/audiochatty-connect`
-will start both again.
+no longer receives anything from it; the machine is still paired and the session is still
+running inside its wrapper, so `/audiochatty-connect` will start both again without needing
+a restart.

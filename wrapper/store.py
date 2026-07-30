@@ -32,6 +32,7 @@ config_dir = audiochat.config_dir
 read_json = audiochat.read_json
 write_private_json = audiochat.write_private_json
 device_token = audiochat.device_token
+safe_filename = audiochat._safe_filename
 pid_is_alive = audiochat._pid_is_alive
 now_iso = audiochat._now_iso
 
@@ -122,9 +123,14 @@ class WrapperState:
         child_pid: int,
         expected_session_id: str | None,
         injector=None,
+        poller=None,
     ):
         self._lock = threading.RLock()
         self._injector = injector
+        # Phase 2. The dependency goes this way — bind rules start the poll loop, and the
+        # poller knows nothing about rendezvous files — so `poller.py` can import from here
+        # without a cycle.
+        self._poller = poller
         self._cleaned = False
         self.path = rendezvous_path(pid)
         self.generation = 0
@@ -188,6 +194,11 @@ class WrapperState:
         backend_url = str(body.get("backend_url") or "").strip().rstrip("/")
         token = str(body.get("token") or "")
         session_name = str(body.get("session_name") or "")[:128]
+        # Optional, and absent means "no". See the note in `Poller.start`: the caller is
+        # telling us whether it has already posted `/agent/session/verified` itself, and if
+        # it has not — or does not say — the poll loop keeps trying until the backend
+        # confirms. Phase 3's `cmd_connect` is the only caller that will set it.
+        verified_reported = bool(body.get("verified_reported"))
 
         if not (agent_session_id and claude_session_id and backend_url and token):
             return 400, {"error": "missing_fields"}
@@ -240,6 +251,8 @@ class WrapperState:
                     token=token,
                     session_name=session_name,
                 )
+                if self._poller is not None:
+                    self._poller.refresh(self.binding)
                 self._write(
                     agent_session_id=agent_session_id,
                     backend_url=backend_url,
@@ -261,6 +274,7 @@ class WrapperState:
                 "backend_url": backend_url,
                 "token": token,
                 "session_name": session_name,
+                "verified_reported": verified_reported,
             }
             self.generation += 1
             stamp = now_iso()
@@ -279,6 +293,10 @@ class WrapperState:
                 session_name=session_name or None,
                 backend_url=backend_url,
             )
+            # Phase 2, W-note in `Poller._loop`: polling starts here, at the bind, and no
+            # longer waits for a handshake to prove the session can be reached.
+            if self._poller is not None:
+                self._poller.start(self.binding, self.generation)
             debug(f"bound to session {claude_session_id}")
             return 200, {
                 "status": "bound",
@@ -298,6 +316,11 @@ class WrapperState:
         token = str(body.get("token") or "")
         if stored and token != stored:
             return 403, {"error": "token_mismatch"}
+
+        if self._poller is not None:
+            # Before the generation moves, so anything already typed is recorded and acked
+            # by the loop that typed it rather than orphaned.
+            self._poller.stop()
 
         with self._lock:
             was = self.binding["claude_session_id"] if self.binding else None
@@ -334,6 +357,9 @@ class WrapperState:
                 "agent_session_id": record["agent_session_id"],
                 "expected_session_id": record["expected_session_id"],
                 "pending_injections": self._injector.pending() if self._injector else 0,
+                # "bound but silent" is the question someone debugging this actually has,
+                # and it is one the rendezvous file cannot answer.
+                "polling": self._poller.polling() if self._poller else False,
             }
 
     def inject(self, body: dict) -> tuple[int, dict]:

@@ -9,14 +9,14 @@ questions out loud — and say what to do next, which arrives in that session as
 you, away from your desk                  this laptop
 ─────────────────────────                 ────────────────────────────────────────
   hear what it did       ◀── audiochatty ◀── scripts/stop_hook.py ◀─ the turn it just finished
-  say what to do next    ──▶ audiochatty ──▶ channel/server.ts   ──▶ your session, as a prompt
+  say what to do next    ──▶ audiochatty ──▶ audiochatty run     ──▶ typed into your session
 ```
 
 Both halves are opt-in per session, and both stop when you disconnect. The second half is
-the one to read carefully: **what you say into audiochatty becomes a prompt in a coding
-agent that edits files and runs commands on this machine.** It is exactly as powerful as
-typing the same words into the terminal yourself, which is the point, and it is worth
-knowing before you connect a session.
+the one to read carefully: **what you say into audiochatty is typed into a coding agent that
+edits files and runs commands on this machine.** It is exactly as powerful as typing the same
+words into the terminal yourself, which is the point, and it is worth knowing before you
+connect a session.
 
 ---
 
@@ -27,11 +27,13 @@ below is in this repo, in the files it names.
 
 | | |
 | --- | --- |
-| **Runtime** | Python 3, standard library only, for everything that pushes out. The return path is [Bun](https://bun.sh) and needs it installed; its dependencies are committed, so there is still no build step. |
-| **Background processes** | One: `channel/server.ts`, which Claude Code starts and stops with each session. Until `/audiochatty-connect` binds it, it does nothing at all — no polling, no network. The hooks are still short-lived processes Claude Code spawns, waits on, and discards. |
-| **On disk** | `~/.audiochatty/` (mode 0700): a credentials file (0600) with your device token, one marker file per registered session, and one rendezvous file per running channel. Nothing else. |
-| **Network** | Your audiochatty backend, and nowhere else — POSTs out from `scripts/audiochat.py`, and a poll for anything addressed to this session from `channel/server.ts`. |
-| **When it's off** | Until you run `/audiochatty-login`, the plugin is inert. Until you run `/audiochatty-connect` in a session, that session sends nothing and receives nothing. |
+| **Runtime** | Python 3, standard library only. No pip, no venv, no build step, nothing to install beyond the plugin itself. |
+| **Background processes** | One, and you start it yourself: `audiochatty run`, which is how you launch Claude Code once you want a session you can talk to. It runs for as long as that session does. Until `/audiochatty-connect` binds it, it does nothing at all — no polling, no network. The hooks are still short-lived processes Claude Code spawns, waits on, and discards. |
+| **What that process can do** | Type into your Claude Code session, as if you had typed it. That is the whole feature and the whole risk; `wrapper/README.md` spells out the limits. |
+| **On disk** | `~/.audiochatty/` (mode 0700): a credentials file (0600) with your device token, one marker file per registered session, and one rendezvous file (0600) per running wrapper. Nothing else. |
+| **Network** | Your audiochatty backend, and nowhere else — POSTs out from `scripts/audiochat.py`, and a poll for anything addressed to this session from `audiochatty run`. Nothing accepts a connection from off this machine. |
+| **When it's off** | Until you run `/audiochatty-login`, the plugin is inert. Until you start a session with `audiochatty run` *and* run `/audiochatty-connect` in it, that session sends nothing and receives nothing. |
+| **Platform** | macOS and Linux. The pseudo-terminal `audiochatty run` is built on doesn't exist on Windows. |
 
 ---
 
@@ -62,13 +64,20 @@ agent**, and type the code. Then run `/audiochatty-login` again:
 > /audiochatty-login
   Linked to Mike's Workspace as Mike.
 
-  One more step, and it's per session rather than per machine: audiochatty needs
-  Claude Code's channel flag to talk back to a session. Start Claude Code with:
+  One more step, and it's per session rather than per machine: a session can only
+  be talked to if you start Claude Code through audiochatty. Start it with:
 
-      claude --dangerously-load-development-channels plugin:audiochatty@audiochatty
+      audiochatty run
 
-  then run /audiochatty-connect there. Without the flag, /audiochatty-connect refuses
-  outright — the session sends nothing and receives nothing.
+  then run /audiochatty-connect there. It's the same Claude Code you already use —
+  same terminal, nothing to load, no warning — with a return path attached. Under
+  plain `claude` there is nothing to tell that session, and /audiochatty-connect
+  refuses outright rather than registering a session you can't reach.
+
+  If `audiochatty` isn't a command on this machine yet, that is one line in your
+  shell profile:
+
+      alias audiochatty="/path/to/audiochat-plugin/wrapper/audiochatty"
 ```
 
 **Why two runs, and why a code instead of a token.** A slash command's output is
@@ -77,48 +86,51 @@ code and then waited would only show you the code once it had already given up w
 And the reason it's a code at all: anything typed into a Claude Code prompt is written to
 the session `.jsonl` on disk and loaded into the model's context. A pasted token would
 live there forever. So the terminal displays something short and disposable, and the
-long-lived token travels back over a channel the transcript never sees — from the backend
+long-lived token travels back over a path the transcript never sees — from the backend
 straight into a 0600 file. **The plugin will never ask you to paste a token, and no
 command here accepts one as an argument.**
 
-**Why that alarming flag.** The return path is a [Claude Code
-channel](https://code.claude.com/docs/en/channels), and during the research preview a
-channel has to be on an Anthropic-curated allowlist to register. This one isn't, and
-submitting it to the community marketplace wouldn't change that. So it needs the
-development flag, and Claude Code shows a full-screen warning about it at startup — that
-warning is doing its job, and you should read it. There is no way around it short of an
-Anthropic partner listing or a Team/Enterprise admin adding this plugin to
-`allowedChannelPlugins`. What the flag buys is the second arrow in the diagram above.
+**Why you start it with `audiochatty run` and not `claude`.** The second arrow in the
+diagram above has to type into a session that is already running, and nothing *inside* a
+session can do that. So `audiochatty run` starts Claude Code inside a pseudo-terminal it
+owns, passes your keystrokes straight through, and types in what you speak from your phone.
+Claude Code can't tell: there's no plugin to load, no launch flag, and no warning dialog —
+from the session's point of view, somebody typed something. Everything after `run` is passed
+to `claude` unchanged, so `audiochatty run --model opus` and `audiochatty run -- --resume`
+work the way you'd expect. `wrapper/README.md` is the detail, including what that process can
+and can't do.
 
 ## Use
 
 ```
-> claude --dangerously-load-development-channels plugin:audiochatty@audiochatty
+> audiochatty run
 > /audiochatty-connect billing-refactor
   This session is now "billing-refactor" in audiochatty.
   You can hear what it does, and tell it what to do next, from audiochatty.
 ```
 
-That's it. Work normally — the terminal looks no different — and each completed turn shows
-up in your inbox under that name. The registration turn itself is not one of them: you
-just watched it happen, so it isn't also sent to you as a message.
+That's it. Work normally — the terminal looks no different, which is measured rather than
+hoped: about 34 microseconds per keystroke and nothing at all on redraw throughput — and each
+completed turn shows up in your inbox under that name. The registration turn itself is not
+one of them: you just watched it happen, so it isn't also sent to you as a message.
 
 | Command | What it does |
 | --- | --- |
 | `/audiochatty-login` | Pair this machine. Once per machine. |
-| `/audiochatty-connect [name]` | Connect *this* session, both directions. The name defaults to the folder name. |
+| `/audiochatty-connect [name]` | Connect *this* session, both directions. The name defaults to the folder name. Refuses if the session wasn't started with `audiochatty run`. |
 | `/audiochatty-status` | Is this machine paired, is this session connected, can it be talked to. Entirely local — no network call. |
-| `/audiochatty-disconnect` | Stop sending and stop receiving. The machine stays paired. |
+| `/audiochatty-disconnect` | Stop sending and stop receiving. The machine stays paired and the session keeps running. |
 
 Every other terminal you have open does nothing at all: the `Stop` hook is global, so it
-runs everywhere, looks for a marker file for that session, finds none, and exits. Every
-other channel process sits unbound and idle.
+runs everywhere, looks for a marker file for that session, finds none, and exits. A session
+started with plain `claude` has no return path to begin with, and any other `audiochatty run`
+you have open sits unbound and idle.
 
-To turn everything off: `claude plugin disable audiochatty`. To remove it:
-`claude plugin uninstall audiochatty` and `rm -rf ~/.audiochatty`. To kill a machine you no
-longer have — a stolen laptop, an old work machine — revoke its token from **Settings →
-Linked devices** in audiochatty; the next thing it sends gets a 401 and the next thing it
-polls for gets nothing.
+To turn everything off: `claude plugin disable audiochatty`, and go back to starting sessions
+with `claude`. To remove it: `claude plugin uninstall audiochatty` and `rm -rf ~/.audiochatty`.
+To kill a machine you no longer have — a stolen laptop, an old work machine — revoke its token
+from **Settings → Linked devices** in audiochatty; the next thing it sends gets a 401 and the
+next thing it polls for gets nothing.
 
 ---
 
@@ -156,31 +168,37 @@ that isn't acceptable for your work, don't connect those sessions.
 ended — never on `/clear` or `/resume`, which keep the same session id and the same open
 terminal.
 
-## Exactly what the channel sends into your session
+## Exactly what the wrapper types into your session
 
-The other direction, and the same promise: one kind of event, and this is what it looks
-like when it arrives.
+The other direction, and the same promise. What arrives is not an event, a notification, or
+anything with a wrapper of its own — it is your words, at the prompt:
 
 ```
-<channel source="plugin:audiochatty:audiochatty"
-         message_id="8f3c…" sender_name="Mike" sent_at="2026-07-27T18:04:11Z">
-change that back, and use the other helper instead
-</channel>
+> change that back, and use the other helper instead
 ```
 
-Your terminal renders that as a one-line `← audiochatty` summary. The body is what you
-dictated, verbatim — audiochatty transcribed it, nobody rewrote it — and Claude is told to
-treat it exactly as if you had typed it there yourself.
+That's the whole of it. The text is what you dictated, verbatim — audiochatty transcribed it,
+nobody rewrote it — and it goes in exactly where your own typing goes, so Claude Code treats
+it as your own typing because that is what it is.
 
-There is one other event, sent once when a session connects: a handshake asking Claude to
-call the `audiochatty_ack` tool with a nonce. It is the only way this plugin can find out
-whether its events are actually being honoured, since an unhonoured one is dropped with no
-error. If the ack comes back, audiochatty shows the session as one you can talk to; if it
-doesn't, audiochatty says you can't, which is the honest answer.
+Three things about *how* it is typed, all of which look like bugs and aren't:
 
-And that is the whole list. `audiochatty_ack` is the only tool this plugin adds, and there
-is deliberately **no reply tool** — the `Stop` hook is already the reply path.
-`channel/README.md` documents the rest: the poll, the dedupe, and why the handshake exists.
+- **It arrives as a paste, then one Enter.** A spoken instruction routinely runs to several
+  paragraphs. Typed raw, the prompt would submit at the first newline and treat the rest as a
+  second instruction, so it goes in wrapped in the terminal's bracketed-paste markers instead.
+  Escape sequences are stripped from the text first, so nothing inside a message can end the
+  paste early and start issuing keystrokes of its own.
+- **It waits for you to stop typing.** If you're mid-sentence when something arrives, the
+  wrapper holds it until you've paused (1.5s by default). An instruction that seems slow is
+  usually this working, not something stuck.
+- **It may take up to 30 seconds to show up.** The wrapper polls; it checks every 5 seconds
+  while a session is active and slows down when nothing has arrived for a while. Nothing is
+  pushed to this machine.
+
+**No tool is added and there is deliberately no reply tool** — the `Stop` hook is already the
+reply path, so the way you hear what happened is the summary of the turn your instruction
+caused. `wrapper/README.md` documents the rest: the poll, the dedupe, and the limits on what
+that process can do.
 
 ---
 
@@ -195,13 +213,13 @@ Start here:
 It answers all of this locally, including which half is broken. Then, in order of
 likelihood:
 
+- **The session was started with `claude`, not `audiochatty run`.** There is nothing that can
+  type into it, so `/audiochatty-connect` refuses outright rather than half-connecting, and
+  prints the command to start again with. This is the common one.
 - **The session was never connected.** `/audiochatty-connect` is per session, not per
   machine, and a new terminal is a new session.
-- **It was started without the channel flag.** `/audiochatty-connect` refuses outright in
-  that case rather than half-connecting, and prints the command to start again with.
-- **audiochatty says you can't talk to this session.** The handshake went unanswered. It is
-  answered on the turn that connects, so finish a turn and check again; if it stays that
-  way, run `/audiochatty-connect` again.
+- **An instruction hasn't appeared yet.** Give it 30 seconds — that's the slow end of the
+  poll — and check you aren't mid-way through typing a line, which makes the wrapper wait.
 - **The backend is asleep or down.** Turns are dropped silently — that is deliberate, since
   a hook that waits on the network is a hook you feel on every turn. After one failure the
   plugin skips the network entirely for 60 seconds rather than paying the timeout again.
@@ -218,8 +236,8 @@ echo '{"session_id":"<your-session-id>","last_assistant_message":"test"}' \
 ```
 
 `AUDIOCHATTY_DEBUG=1` puts one line on stderr per hook run and changes nothing else. The
-same variable makes `/audiochatty-connect` explain which channels it found and why it
-picked or refused one, and makes the channel server log what it polls and injects.
+same variable makes `/audiochatty-connect` explain which wrapper it found and why it accepted
+or refused it, and makes `audiochatty run` log what it polls and types in.
 
 ### Pointing at a different backend
 
@@ -229,23 +247,22 @@ AUDIOCHATTY_BACKEND_URL=http://localhost:8000 python3 scripts/audiochat.py login
 
 `--backend-url` does the same for one command. Once paired, the URL you paired against is
 remembered in `~/.audiochatty/credentials.json`, because a device token is only valid at the
-backend that minted it. The channel is handed that same URL when `/audiochatty-connect`
-binds it, so it never needs configuring separately.
+backend that minted it. The wrapper is handed that same URL when `/audiochatty-connect` binds
+it, so it never needs configuring separately.
 
 ---
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests     # 111 tests, no network, no Claude Code needed
+python3 -m unittest discover -s tests     # no network, no Claude Code needed
 claude plugin validate .                  # manifests
 ```
 
-The tests run every script as a subprocess against a stub HTTP server, and the channel as a
-real subprocess speaking MCP over stdio, with `AUDIOCHATTY_HOME` pointed at a temp
-directory — so they're safe to run on a machine that is already paired, and they assert on
-what was actually sent over the wire. The channel tests need Bun; they skip themselves
-without it.
+The tests run every script as a subprocess against a stub HTTP server, and the wrapper as a
+real subprocess with a real pseudo-terminal and a fake `claude`, with `AUDIOCHATTY_HOME`
+pointed at a temp directory — so they're safe to run on a machine that is already paired, and
+they assert on what was actually sent over the wire and what actually reached the child.
 
 Three things worth knowing if you change this code:
 
@@ -253,10 +270,12 @@ Three things worth knowing if you change this code:
   every turn in every session on the machine. The marker-file check comes first for that
   reason, and there's a test that fails if an unreachable backend costs more than one
   timeout.
-- **A channel cannot tell whether channels are enabled.** Its server starts whenever the
-  plugin is enabled; the launch flag decides only whether its events are honoured, and an
-  unhonoured event is dropped with no error. That is why `/audiochatty-connect` reads the
-  `claude` process's command line, and why the handshake exists.
+- **A slash command finds its wrapper through one inherited environment variable**, not by
+  inspecting processes. `AUDIOCHATTY_WRAPPER_PORT` and `AUDIOCHATTY_WRAPPER_PID` are set in the
+  environment `claude` is started with, so everything the session runs can read them. The
+  wrapper also mints its child's session id up front and publishes it, which is what lets
+  `/audiochatty-connect` refuse to bind a *nested* plain `claude` that inherited those
+  variables without owning them.
 - **A session name containing a double quote won't survive** the shell line in
   `commands/audiochatty-connect.md`, since `$ARGUMENTS` is substituted as text. Use plain
   names.

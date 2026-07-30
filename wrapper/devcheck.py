@@ -92,6 +92,11 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("show", help="Every running wrapper, from its rendezvous file.")
     sub.add_parser("status", help="Ask one wrapper directly.")
+    parser.add_argument(
+        "--backend-url",
+        help="Where the poll loop should ask for instructions. Defaults to an unreachable "
+        "address, so a bind from here does not start talking to production by accident.",
+    )
     sub.add_parser("bind", help="Stand in for /audiochatty-connect.")
     sub.add_parser("unbind", help="Stand in for /audiochatty-disconnect.")
     inject = sub.add_parser("inject", help="Type text into the session.")
@@ -113,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
     record = pick(args.port)
 
     if args.command == "status":
+        # `polling` is the field to look at here: bound and not polling means the loop died,
+        # which is a different problem from not being bound at all.
         request(record, "status", None, method="GET")
         return 0
 
@@ -126,9 +133,10 @@ def main(argv: list[str] | None = None) -> int:
             "agent_session_id": "devcheck-manual",
             # The wrapper refuses a session it did not start, so this has to be its own.
             "claude_session_id": record.get("expected_session_id") or "devcheck-session",
-            # Deliberately unreachable: nothing in Phase 1 calls out, and a real URL here
-            # would have Phase 2's poller talking to production from a hand test.
-            "backend_url": "http://127.0.0.1:1",
+            # Unreachable unless you ask for something else. Phase 2's poller starts at the
+            # bind, so a real URL here means a hand test talking to production — pass
+            # `--backend-url` deliberately when that is what you want.
+            "backend_url": args.backend_url or "http://127.0.0.1:1",
             "session_name": "devcheck",
         })
     elif args.command == "unbind":

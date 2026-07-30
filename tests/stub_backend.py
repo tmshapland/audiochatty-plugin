@@ -119,7 +119,7 @@ DEFAULTS: dict[str, tuple[int, dict]] = {
     "/agent/session/end": (200, {"session_id": "33333333-3333-3333-3333-333333333333",
                                  "status": "ended"}),
     "/agent/turn": (202, {"status": "queued", "job_id": "44444444-4444-4444-4444-444444444444"}),
-    # The return path. An empty queue is the ordinary answer here — the channel polls
+    # The return path. An empty queue is the ordinary answer here — the wrapper polls
     # forever — so the default is an empty list rather than a 404.
     "/agent/inbound": (200, {"messages": []}),
     "/agent/inbound/ack": (200, {"message_ids": []}),

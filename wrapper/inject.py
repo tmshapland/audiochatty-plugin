@@ -105,8 +105,9 @@ class Injector:
         # Called after `enqueue` so the proxy loop's `select` returns now rather than at the
         # end of its timeout. Without it an instruction can sit for a second doing nothing.
         self._wake = wake
+        self._on_delivered = None
         self._last_keystroke = 0.0
-        self.delivered: list[str | None] = []
+        self._delivered: list[str | None] = []
 
     # -- from the proxy loop --
 
@@ -114,6 +115,16 @@ class Injector:
         """The proxy owns the pipe that interrupts `select`, and it is constructed after the
         injector, so it hands the callback back here rather than the other way round."""
         self._wake = wake
+
+    def set_on_delivered(self, callback) -> None:
+        """Called once, after any flush that actually wrote something.
+
+        Phase 2's poller is the caller. It needs this because *it* cannot know when the
+        bytes went in — the quiet period means an instruction can be handed over here and
+        typed a minute later — and the ack it owes the backend has to follow the typing, not
+        the handing over. See `poller.py`'s note on the order.
+        """
+        self._on_delivered = callback
 
     def note_keystroke(self) -> None:
         """The user typed. Called for every read from the real keyboard, so it has to stay
@@ -140,13 +151,16 @@ class Injector:
             try:
                 if type_text(master_fd, text):
                     sent += 1
-                    self.delivered.append(message_id)
+                    with self._lock:
+                        self._delivered.append(message_id)
             except OSError:
                 # The pty is gone, which means the child is gone and the wrapper is on its
-                # way out. Dropping it here is right: Phase 2's ledger only records an id
-                # after a successful write, so an undelivered instruction is still pending
-                # at the backend and arrives in the next session.
-                return sent
+                # way out. Dropping it here is right: the ledger only records an id after a
+                # successful write, so an undelivered instruction is still pending at the
+                # backend and arrives in the next session.
+                break
+        if sent and self._on_delivered:
+            self._on_delivered()
         return sent
 
     # -- from anywhere --
@@ -166,6 +180,17 @@ class Injector:
     def pending(self) -> int:
         with self._lock:
             return len(self._pending)
+
+    def drain_delivered(self) -> list[str | None]:
+        """The message ids typed in since the last call, and clears them.
+
+        Drained rather than read so there is exactly one consumer and no id can be recorded
+        twice. An id only appears here after a full, successful write into the pty — which
+        is what makes it safe for the poller to treat this as "delivered".
+        """
+        with self._lock:
+            typed, self._delivered = self._delivered, []
+        return typed
 
     # -- internal --
 

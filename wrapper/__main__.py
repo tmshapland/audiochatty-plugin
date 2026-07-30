@@ -75,7 +75,7 @@ it is given instead.
 a session it does not own.
 
     POST /bind      {agent_session_id, claude_session_id, backend_url, token,
-                     session_name?}
+                     session_name?, verified_reported?}
                     200 {"status": "bound"|"rebound", pid, claude_session_id,
                          agent_session_id, verified}
                     400 invalid_json | missing_fields
@@ -88,7 +88,8 @@ a session it does not own.
                     403 token_mismatch
 
     GET  /status    200 {pid, child_pid, port, bound, verified, generation,
-                         claude_session_id, agent_session_id, expected_session_id}
+                         claude_session_id, agent_session_id, expected_session_id,
+                         pending_injections, polling}
                     Never mentions the token. Always answers immediately.
 
     POST /inject    {token, text, message_id?}
@@ -105,6 +106,13 @@ anything that can reach this port and read `credentials.json` can type anything 
 terminal — which is why it is token-gated, refuses while unbound, and is written up in
 `wrapper/README.md` in those words.
 
+Two fields on that list are Phase 2's, and both are additive — Phase 3 can ignore either
+and still be correct. `verified_reported` on `/bind` is how `/audiochatty-connect` says it
+has already told the backend this session is reachable; leaving it out means the poll loop
+keeps trying until the backend confirms, which is the safe default (`poller.Poller.start`).
+`polling` on `/status` answers the one question the rendezvous file cannot: bound, but is
+anything actually asking?
+
 ## What runs, in what order, and why the order is load-bearing
 
     1. bind the loopback socket        → we need its port before the child exists
@@ -112,6 +120,10 @@ terminal — which is why it is token-gated, refuses while unbound, and is writt
     3. start the control server thread → now threads are allowed
     4. run the proxy loop              → until the child exits
     5. exit with the child's code      → `audiochatty run` behaves like `claude` in a script
+
+The poll loop is not in that list because it is not started here: nothing polls until a
+session binds, and until then this process makes no network calls at all. `/bind` starts
+it, `/unbind` stops it, and step 5 closes it — see `poller.py`.
 
 Steps 1-3 are in that order because step 2 forks, and `subprocess`'s `preexec_fn` runs
 Python between the fork and the exec. In a process that already has threads, that is a
@@ -137,6 +149,7 @@ if str(_PLUGIN_ROOT) not in sys.path:
 from wrapper import store  # noqa: E402
 from wrapper.control import ControlServer  # noqa: E402
 from wrapper.inject import DEFAULT_QUIET_PERIOD, Injector  # noqa: E402
+from wrapper.poller import Poller  # noqa: E402
 from wrapper.pty_proxy import PtyProxy, SpawnFailed  # noqa: E402
 
 # Arguments that mean "the session id is already decided, don't mint one". `--session-id`
@@ -203,6 +216,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     child_env["AUDIOCHATTY_WRAPPER_PID"] = str(os.getpid())
 
     injector = Injector(quiet_period=args.quiet_period)
+    # Constructed unconditionally, started by nothing: it makes no network call until a
+    # session binds. That is the "costs nothing until connected" property, and it is the
+    # reason this can be a plain object rather than an option.
+    poller = Poller(injector)
     proxy = PtyProxy(
         [args.claude_bin, *claude_args],
         env=child_env,
@@ -233,6 +250,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             child_pid=proxy.child_pid,
             expected_session_id=expected_session_id,
             injector=injector,
+            poller=poller,
         )
         # 3. Threads are allowed from here on.
         control.serve(state)
@@ -244,7 +262,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         return proxy.run()
     finally:
+        # The control port first, so nothing can bind while we are shutting down; then the
+        # poller, whose last act is to record anything the injector typed but had not yet
+        # reported (W9); then the rendezvous file, because a file for a process that has
+        # exited is worse than no file at all.
         control.close()
+        poller.close()
         state.cleanup()
 
 

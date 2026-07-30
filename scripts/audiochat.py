@@ -15,14 +15,16 @@ Four subcommands, one per slash command, plus the two hook scripts that import t
     disconnect  retire this session
 
 **What is on disk, and why so little.** `~/.audiochatty/` (0700) holds a credentials file
-(0600) with the device token, a `sessions/` directory of marker files, a `channels/`
-directory the channel server writes its rendezvous into, and — only while a pairing is in
-flight — a `pending.json` holding the `device_code`. Nothing else.
+(0600) with the device token, a `sessions/` directory of marker files, a `wrappers/`
+directory each `audiochatty run` writes its rendezvous into, and — only while a pairing is
+in flight — a `pending.json` holding the `device_code`. Nothing else.
 
-**There is one long-lived process now, and it is not this one.** `channel/server.ts` is the
-return path (`channel_return_path_plan.md` R2): Claude Code spawns it, it does nothing until
-`connect` binds it, and everything this file does about it is in "the channel" section
-below. This script itself is still what it was — short-lived, one job, then gone.
+**There is one long-lived process now, it is not this one, and it is not inside the
+session.** The return path is `wrapper/` — the process `audiochatty run` is
+(`wrapper_return_path_plan.md` W1). It started this `claude` on a pty and can type into it,
+it does nothing until `connect` binds it, and everything this file does about it is in "the
+wrapper" section below. This script itself is still what it was — short-lived, one job,
+then gone.
 
 **The token is never printed and never taken as an argument.** Anything typed into a
 Claude Code prompt lands in the session `.jsonl` and in the model's context, and anything
@@ -39,7 +41,6 @@ import gzip
 import json
 import os
 import socket
-import subprocess
 import sys
 import time
 import urllib.error
@@ -341,103 +342,53 @@ def consume_skip_next_turn(claude_session_id: str, marker: dict) -> bool:
     return True
 
 
-# -- the channel (R4) ------------------------------------------------------------------
+# -- the wrapper (W1, W3) --------------------------------------------------------------
 #
-# The return path is a second process — `channel/server.ts`, an MCP server Claude Code
-# spawns when the plugin is enabled — and this section is how a slash command running
-# *inside* a session finds the one that belongs to it.
+# The return path is a process that sits *in front of* this session rather than inside it.
+# `audiochatty run` opened a pty, started this `claude` in it, and can type into it — see
+# `wrapper/__main__.py`, whose docstring is the frozen API this section is written against
+# and the only thing it is written against.
 #
-# The problem is that the channel starts before `/audiochatty-connect` does, and one
-# machine can have fifteen of them. Nothing may inject into the wrong terminal. So each
-# channel writes `~/.audiochatty/channels/<pid>.json` describing itself, and this side
-# picks the one that shares its `claude` process. Three signals, any one of which is
-# enough, because they fail independently:
+# **Finding it is one environment variable** (W3). The wrapper exports
+# `AUDIOCHATTY_WRAPPER_PID` and `AUDIOCHATTY_WRAPPER_PORT` into the environment `claude`
+# inherits, so everything the session runs — this command included — can read them. That
+# replaces ~200 lines here that answered "which session am I?" out of `ps` output, with
+# three independent signals and an ambiguity case. None of that can arise now: the answer
+# is inherited rather than deduced, so there is exactly one candidate or none, and the old
+# "found more than one" refusal has nothing left to describe.
 #
-#   1. `claude_env.CLAUDE_SESSION_ID` — exact, if that variable reaches an MCP server.
-#   2. `claude_env.CLAUDE_PID` — exact, if that one does.
-#   3. the channel's recorded ancestry containing our own `claude` pid.
-#
-# `CLAUDE_PID` is set in *this* process's environment and equals the `claude` in our own
-# ancestry (measured, 2026-07-28), which is what makes (2) and (3) usable from here.
-#
-# **Ambiguity is an error, never a guess.** Zero matches and two matches each get their own
-# refusal, and neither registers anything.
+# **What is still worth checking is that the candidate is really ours** (W3). A wrapped
+# session can run a Bash tool call, and someone can type plain `claude` inside that — an
+# inner session which inherits both variables and is *not* the one the wrapper started.
+# Binding it would aim spoken instructions at the outer terminal. The wrapper minted its
+# child's session id, so it publishes `expected_session_id` and this side compares against
+# it. That is the one refusal left, and it is not the same answer as "no wrapper".
 
-CHANNEL_TIMEOUT = 3.0
+WRAPPER_TIMEOUT = 3.0
 
-# What a session has to be started with for its channel's events to be honoured. Not
-# optional and not evadable: during the research preview a channel must be on an
-# Anthropic-curated allowlist to register, ours is not on it, and the community-marketplace
-# submission does not add it. Both ways in — the allowlist (`--channels`) and the
-# development flag — name the plugin on the command line, which is what makes the check in
-# `channels_flag_names_us` a fair test rather than a guess about the future.
-LAUNCH_COMMAND = "claude --dangerously-load-development-channels plugin:audiochatty@audiochatty"
+# How a session gets a return path. 👤 chose the bare command over an alias-only story
+# (`wrapper_return_path_plan.md` Phase 0, 2026-07-29): "this is for developers, they can do
+# commands." So this is printed flat wherever it appears, and the alias below is the install
+# step that makes it exist rather than a second way to spell it.
+RUN_COMMAND = "audiochatty run"
 
-CHANNEL_FLAGS = ("--dangerously-load-development-channels", "--channels")
+# The launcher shipped in this plugin, for the one line that turns `RUN_COMMAND` into a real
+# command. Resolved from this file so it is correct wherever the plugin was installed, which
+# a hardcoded `~/.claude/plugins/...` path would not be.
+WRAPPER_LAUNCHER = Path(__file__).resolve().parent.parent / "wrapper" / "audiochatty"
 
 
-def channels_dir() -> Path:
-    """`~/.audiochatty/channels`, the same directory `channel/server.ts` writes to."""
-    directory = config_dir() / "channels"
+def wrappers_dir() -> Path:
+    """`~/.audiochatty/wrappers`, the directory the wrapper writes its rendezvous files to.
+
+    Deliberately a second, smaller implementation of `wrapper/store.py`'s `wrappers_dir`,
+    and the reason is the direction of the dependency: `store.py` imports *this* module for
+    `write_private_json` and friends, so importing it back would be a cycle. Two four-line
+    functions is the cheaper of those two problems, and this side only ever reads.
+    """
+    directory = config_dir() / "wrappers"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     return directory
-
-
-def _process_table() -> dict[int, tuple[int, str]]:
-    """`{pid: (ppid, comm)}` from one `ps`.
-
-    One call for the whole table rather than one per generation: this runs in front of a
-    slash command a person is waiting on. `-Ao` is accepted by both BSD `ps` (macOS) and
-    procps (Linux), and the channel builds its half of the ancestry the same way.
-    """
-    try:
-        out = subprocess.run(
-            ["ps", "-Ao", "pid=,ppid=,comm="],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    if out.returncode != 0:
-        return {}
-
-    table: dict[int, tuple[int, str]] = {}
-    for line in out.stdout.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) < 2:
-            continue
-        try:
-            table[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
-        except ValueError:
-            continue
-    return table
-
-
-def claude_pid() -> int | None:
-    """The `claude` process this command is running under.
-
-    `CLAUDE_PID` is exported into the environment of everything Claude Code spawns, so the
-    ancestry walk is the fallback rather than the mechanism. The walk stops at the first
-    process whose command is `claude` — on macOS `comm` is a full path, so match the
-    basename.
-    """
-    from_env = os.environ.get("CLAUDE_PID", "").strip()
-    if from_env.isdigit():
-        return int(from_env)
-
-    table = _process_table()
-    pid = os.getpid()
-    seen = set()
-    for _ in range(32):
-        if pid <= 1 or pid in seen or pid not in table:
-            return None
-        seen.add(pid)
-        ppid, comm = table[pid]
-        if os.path.basename(comm.strip()) == "claude":
-            return pid
-        pid = ppid
-    return None
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -453,141 +404,99 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
-def read_channels() -> list[dict]:
-    """Every live channel on this machine, from its rendezvous file.
+def read_wrappers() -> list[dict]:
+    """Every live wrapper on this machine, from its rendezvous file.
 
-    A file whose process is gone is skipped rather than deleted — the channel prunes those
+    A file whose process is gone is skipped rather than deleted — the wrapper prunes those
     itself at startup, and a slash command that garbage-collects another process's state is
     a slash command that races with it.
     """
     found = []
     try:
-        entries = sorted(channels_dir().glob("*.json"))
+        entries = sorted(wrappers_dir().glob("*.json"))
     except OSError:
         return []
     for path in entries:
         if not path.stem.isdigit():
             continue
-        data = read_json(path)
-        pid = data.get("pid")
-        port = data.get("port")
+        record = read_json(path)
+        pid = record.get("pid")
+        port = record.get("port")
         if not isinstance(pid, int) or not isinstance(port, int) or port <= 0:
+            continue
+        # A machine mid-upgrade could have both kinds of file around. `kind` is absent only
+        # in a hand-written one, so a missing value reads as ours and a *different* value
+        # does not.
+        if str(record.get("kind") or "wrapper") != "wrapper":
             continue
         if not _pid_is_alive(pid):
             continue
-        found.append(data)
+        found.append(record)
     return found
 
 
-def _channel_matches(channel: dict, claude_session_id: str, my_claude_pid: int | None) -> bool:
-    env = channel.get("claude_env")
-    env = env if isinstance(env, dict) else {}
+def find_wrapper(claude_session_id: str) -> tuple[dict | None, str]:
+    """The wrapper this session is running inside, or why there isn't one.
 
-    if claude_session_id and str(env.get("CLAUDE_SESSION_ID") or "") == claude_session_id:
-        return True
-    if my_claude_pid is not None:
-        if str(env.get("CLAUDE_PID") or "").strip() == str(my_claude_pid):
-            return True
-        ancestry = channel.get("ancestry")
-        if isinstance(ancestry, list):
-            for entry in ancestry:
-                if isinstance(entry, dict) and entry.get("pid") == my_claude_pid:
-                    return True
-    return False
+    Returns `(wrapper, "")`, `(None, "none")`, or `(None, "session_mismatch")`.
 
+    `AUDIOCHATTY_WRAPPER_PID` names the rendezvous file and `AUDIOCHATTY_WRAPPER_PORT` is
+    checked against what that file says, so a variable left behind by a wrapper that has
+    since exited — and whose pid has since been reused by something else — resolves to
+    nothing rather than to the wrong process.
 
-def find_channel(claude_session_id: str) -> tuple[dict | None, str]:
-    """The channel belonging to this session, or why there isn't one.
-
-    Returns `(channel, "")`, `(None, "none")`, or `(None, "ambiguous")`. A channel already
-    bound to *another* session is not a candidate — it belongs to somebody else's terminal
-    — while one bound to ours is exactly what `/audiochatty-connect` run twice should find.
+    **`session_mismatch` is W3's refusal and it is a different answer from `none`.** It
+    means a wrapper *was* found and it belongs to another session: the nested-`claude` case
+    in this section's opening comment. Telling that user to run `audiochatty run` would be
+    true and useless — they are already inside one.
     """
-    my_claude_pid = claude_pid()
-    live = read_channels()
-    matches = [c for c in live if _channel_matches(c, claude_session_id, my_claude_pid)]
-    _debug_channels(claude_session_id, my_claude_pid, len(live), len(matches))
-
-    ours = [c for c in matches if str(c.get("claude_session_id") or "") == claude_session_id]
-    if ours:
-        # Already bound to us: a re-run in the same terminal. `/bind` treats it as a
-        # refresh and re-probes if the last handshake went unanswered.
-        return ours[0], ""
-
-    free = [c for c in matches if not c.get("bound")]
-    if len(free) == 1:
-        return free[0], ""
-    if not free:
+    pid_raw = os.environ.get("AUDIOCHATTY_WRAPPER_PID", "").strip()
+    port_raw = os.environ.get("AUDIOCHATTY_WRAPPER_PORT", "").strip()
+    if not port_raw.isdigit():
+        _debug_wrapper("no AUDIOCHATTY_WRAPPER_PORT in the environment")
         return None, "none"
-    return None, "ambiguous"
+    port = int(port_raw)
+
+    live = read_wrappers()
+    if pid_raw.isdigit():
+        pid = int(pid_raw)
+        candidates = [w for w in live if w.get("pid") == pid and w.get("port") == port]
+    else:
+        # The pid is the better key, but the port alone still identifies a process: one
+        # listener, one port. This is the path for a wrapper that exported only the port.
+        candidates = [w for w in live if w.get("port") == port]
+
+    if not candidates:
+        _debug_wrapper(f"no live wrapper at pid={pid_raw or '?'} port={port}")
+        return None, "none"
+
+    wrapper = candidates[0]
+    expected = str(wrapper.get("expected_session_id") or "")
+    if expected and claude_session_id and expected != claude_session_id:
+        _debug_wrapper(f"wrapper expects session {expected}, this is {claude_session_id}")
+        return None, "session_mismatch"
+    return wrapper, ""
 
 
-def _debug_channels(
-    claude_session_id: str, my_claude_pid: int | None, live: int, matched: int
-) -> None:
+def _debug_wrapper(message: str) -> None:
     """`AUDIOCHATTY_DEBUG=1` explains a refusal.
 
-    Correlation is the part of this design most likely to be wrong on a machine nobody has
-    tried it on, and "no channel found" is indistinguishable from "found it, rejected it"
-    without this.
+    Far less to explain than the old correlation needed, but "there is no wrapper" and
+    "there is one and it isn't ours" are still worth telling apart on a machine where this
+    is going wrong, and they are indistinguishable from the printed message alone.
     """
     if not os.environ.get("AUDIOCHATTY_DEBUG"):
         return
-    print(
-        f"[audiochatty] claude pid={my_claude_pid} session={claude_session_id} "
-        f"channels={live} matched={matched}",
-        file=sys.stderr,
-    )
+    print(f"[audiochatty] {message}", file=sys.stderr)
 
 
-def channels_flag_names_us(pid: int | None) -> bool | None:
-    """Was this session started with a channels flag naming audiochatty?
-
-    **This is the check that makes R1 enforceable, and it exists because the obvious one
-    does not work.** A channel server starts whenever the plugin is enabled; the flag
-    decides only whether its notifications are *honoured*, and an unhonoured notification is
-    dropped with no error. So a bind succeeds either way, and the handshake that would prove
-    the difference cannot be answered until this command has returned and the model's turn
-    begins. The command line is the one place the answer is legible at the moment we need
-    it.
-
-    Returns True, False, or **None for "could not tell"** — a `ps` that fails must not
-    become a refusal, since the cost of failing closed here is a plugin that never registers
-    anything.
-    """
-    if pid is None:
-        return None
-
-    try:
-        out = subprocess.run(
-            ["ps", "-ww", "-o", "args=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if out.returncode != 0 or not out.stdout.strip():
-        return None
-
-    tokens = out.stdout.strip().split()
-    values: list[str] = []
-    for index, token in enumerate(tokens):
-        for flag in CHANNEL_FLAGS:
-            if token == flag and index + 1 < len(tokens):
-                values.append(tokens[index + 1])
-            elif token.startswith(f"{flag}="):
-                values.append(token[len(flag) + 1 :])
-    # Deliberately loose about the entry's shape: `plugin:audiochatty@audiochatty` today,
-    # `server:audiochatty` for a bare `.mcp.json`, and whatever an allowlisted future spells
-    # it as. Comma-separated lists are split because a session may load several channels.
-    # What is not loose is that some channels flag has to name us at all.
-    return any("audiochatty" in entry for value in values for entry in value.split(","))
+def _wrapper_base(wrapper: dict) -> str:
+    return f"http://127.0.0.1:{int(wrapper['port'])}"
 
 
-def bind_channel(channel: dict, *, agent_session_id: str, claude_session_id: str,
+def bind_wrapper(wrapper: dict, *, agent_session_id: str, claude_session_id: str,
                  base: str, token: str, name: str) -> dict:
-    """`POST /bind` on the channel's loopback port. Raises `ApiError`/`TransportError`."""
+    """`POST /bind` on the wrapper's loopback port. Raises `ApiError`/`TransportError`."""
     return post(
         "/bind",
         {
@@ -597,20 +506,20 @@ def bind_channel(channel: dict, *, agent_session_id: str, claude_session_id: str
             "token": token,
             "session_name": name,
         },
-        base_url=f"http://127.0.0.1:{int(channel['port'])}",
-        timeout=CHANNEL_TIMEOUT,
+        base_url=_wrapper_base(wrapper),
+        timeout=WRAPPER_TIMEOUT,
     )
 
 
-def unbind_channel(channel: dict, token: str | None) -> bool:
-    """`POST /unbind`, best effort. A channel that cannot be reached is one that has already
+def unbind_wrapper(wrapper: dict, token: str | None) -> bool:
+    """`POST /unbind`, best effort. A wrapper that cannot be reached is one that has already
     exited, which is the same outcome by a different route."""
     try:
         post(
             "/unbind",
             {"token": token or ""},
-            base_url=f"http://127.0.0.1:{int(channel['port'])}",
-            timeout=CHANNEL_TIMEOUT,
+            base_url=_wrapper_base(wrapper),
+            timeout=WRAPPER_TIMEOUT,
         )
     except (ApiError, TransportError, KeyError, TypeError, ValueError):
         return False
@@ -618,14 +527,34 @@ def unbind_channel(channel: dict, token: str | None) -> bool:
 
 
 def _print_relaunch(reason: str) -> None:
+    """The one refusal left (W4). The old design had two — no channel, and a channel whose
+    events were not honoured — and both meant "relaunch with the flag". There is no flag now,
+    so there is one cause and one instruction."""
     print(reason)
     print()
-    print("Start it again with the channel flag:")
+    print("Start Claude Code through audiochatty instead:")
     print()
-    print(f"    {LAUNCH_COMMAND}")
+    print(f"    {RUN_COMMAND}")
     print()
-    print("Claude Code will show a warning about development channels — that is expected;")
-    print("channels are in research preview. Then run /audiochatty-connect again.")
+    print("That is the same Claude Code you already use — same terminal, no plugin to load,")
+    print("no warning — with a return path attached. Then run /audiochatty-connect again.")
+    print()
+    print("If `audiochatty` isn't a command on this machine yet, that is one line in your")
+    print("shell profile:")
+    print()
+    print(f'    alias audiochatty="{WRAPPER_LAUNCHER}"')
+
+
+def _print_nested_session() -> None:
+    """W3's refusal. Rare, but the generic advice is actively misleading here — this user
+    did start a wrapped session, and is now in a second one nested inside it."""
+    print("This isn't the session `audiochatty run` started. It looks like a plain `claude`")
+    print("started from inside a wrapped one, which inherited the return path without owning")
+    print("it.")
+    print()
+    print("Connecting it would type what you say into the outer terminal rather than this")
+    print("one, so nothing was registered. Run /audiochatty-connect in the session you")
+    print("started with `audiochatty run`.")
 
 
 # -- login -----------------------------------------------------------------------------
@@ -808,18 +737,24 @@ def _login_finish(response: dict, base: str) -> int:
     who = response.get("profile_name")
     print(f"Linked to {workspace}" + (f" as {who}." if who else "."))
     print()
-    # R12. Four surfaces describe this setup — two manifest descriptions, the README, and
-    # here — and this is the only one whose words we fully control and the only one the
-    # user is looking at when the step is actually due. So it carries the command and the
-    # reason, not a pointer to somewhere else that carries them.
-    print("One more step, and it's per session rather than per machine: audiochatty needs")
-    print("Claude Code's channel flag before a session can be registered at all. Start")
-    print("Claude Code with:")
+    # R12, and Phase 0's launch decision. Four surfaces describe this setup — two manifest
+    # descriptions, the README, and here — and this is the only one whose words we fully
+    # control and the only one the user is looking at when the step is actually due. So it
+    # carries the command and the reason, not a pointer to somewhere else that carries them.
+    print("One more step, and it's per session rather than per machine: a session can only")
+    print("be talked to if you start Claude Code through audiochatty. Start it with:")
     print()
-    print(f"    {LAUNCH_COMMAND}")
+    print(f"    {RUN_COMMAND}")
     print()
-    print("then run /audiochatty-connect there. Without the flag, /audiochatty-connect")
-    print("refuses outright — the session sends nothing and receives nothing.")
+    print("then run /audiochatty-connect there. It's the same Claude Code you already use —")
+    print("same terminal, nothing to load, no warning — with a return path attached. Under")
+    print("plain `claude` there is nothing to tell that session, and /audiochatty-connect")
+    print("refuses outright rather than registering a session you can't reach.")
+    print()
+    print("If `audiochatty` isn't a command on this machine yet, that is one line in your")
+    print("shell profile:")
+    print()
+    print(f'    alias audiochatty="{WRAPPER_LAUNCHER}"')
     return 0
 
 
@@ -827,18 +762,19 @@ def _login_finish(response: dict, base: str) -> int:
 
 
 def cmd_connect(args: argparse.Namespace) -> int:
-    """Register this session, and bind the channel that lets it be talked to.
+    """Register this session, and bind the wrapper that lets it be talked to.
 
-    Deterministic by design (D1): read the session id, find the channel, POST twice, write
-    a marker. Nothing here is a judgment call, which is why it is a slash command and not a
+    Deterministic by design (D1): read the session id, find the wrapper, POST, write a
+    marker. Nothing here is a judgment call, which is why it is a slash command and not a
     skill — routing it through the model means it can be paraphrased, skipped, or done
     twice.
 
-    **The channel is checked before anything is registered** (R1). Both refusals below are
-    local and cost nothing, and taking them first is what keeps a refused `connect` from
-    leaving a live session row behind. The order after that is registration → bind →
-    marker, because `/bind` needs the `agent_sessions.id` that registration returns and the
-    marker is the Stop hook's gate, which must not open until the whole thing worked.
+    **The wrapper is checked before anything is registered** (W4, unchanged from R1). Both
+    refusals below are local and cost nothing, and taking them first is what keeps a refused
+    `connect` from leaving a live session row behind. The order after that is registration →
+    bind → verified → marker: `/bind` needs the `agent_sessions.id` that registration
+    returns, `/agent/session/verified` states a fact that only becomes true at the bind
+    (W8), and the marker is the Stop hook's gate, which must not open until the rest worked.
     """
     token = device_token()
     if not token:
@@ -853,30 +789,14 @@ def cmd_connect(args: argparse.Namespace) -> int:
     repo_path = args.cwd or os.getcwd()
     name = (args.name or "").strip() or os.path.basename(repo_path.rstrip("/")) or "claude-code"
 
-    channel, problem = find_channel(claude_session_id)
-    if problem == "ambiguous":
-        print("Found more than one audiochatty channel for this terminal, and there is no")
-        print("safe way to tell which one is this session.")
-        print()
-        print("Binding the wrong one would deliver what you say into a different terminal,")
-        print("so nothing was registered. Close the other Claude Code sessions started from")
-        print("this window, or run /audiochatty-connect from a fresh terminal.")
+    wrapper, problem = find_wrapper(claude_session_id)
+    if problem == "session_mismatch":
+        _print_nested_session()
         return 1
-    if channel is None:
+    if wrapper is None:
         _print_relaunch(
-            "This session has no audiochatty channel, so it can't be talked to — and a\n"
+            "This session has no audiochatty return path, so it can't be talked to — and a\n"
             "session you can't talk to isn't worth registering."
-        )
-        return 1
-
-    # A channel process running is not the same as a session whose channel events are
-    # honoured. See `channels_flag_names_us`: this is the only moment the difference is
-    # visible, and a session that fails it would register, bind, and then silently swallow
-    # every instruction spoken to it.
-    if channels_flag_names_us(claude_pid()) is False:
-        _print_relaunch(
-            "This session was started without Claude Code's channel flag, so audiochatty\n"
-            "will not connect to it at all — not even to listen. Nothing was registered."
         )
         return 1
 
@@ -904,8 +824,8 @@ def cmd_connect(args: argparse.Namespace) -> int:
     agent_session_id = str(response.get("session_id") or "")
 
     try:
-        bind_channel(
-            channel,
+        bind_wrapper(
+            wrapper,
             agent_session_id=agent_session_id,
             claude_session_id=claude_session_id,
             base=backend_url(args.backend_url),
@@ -916,15 +836,19 @@ def cmd_connect(args: argparse.Namespace) -> int:
         # Registration already landed, so this is the one path that has to undo something.
         # Best effort, and the failure of the undo is survivable: what it leaves is a
         # session with no marker, which sends nothing and reads as unreachable in the inbox
-        # — the same degraded state as a session whose handshake went unanswered, which
-        # Phase 6 already has somewhere to show.
+        # — a degraded state the frontend already has somewhere to show.
         _end_session_quietly(claude_session_id, token, args.backend_url)
-        print(f"Couldn't connect this session's audiochatty channel ({exc}).")
+        print(f"Couldn't connect this session's audiochatty return path ({exc}).")
         print("Nothing was registered. Try /audiochatty-connect again; if it keeps failing,")
-        print("start the session again with:")
-        print()
-        print(f"    {LAUNCH_COMMAND}")
+        print(f"exit and start the session again with `{RUN_COMMAND}`.")
         return 1
+
+    # W8. The bind *is* the proof of reachability, so this states it rather than proving it:
+    # there is no nonce, no injected handshake, no tool call for the model to answer, and no
+    # retry loop here. Failure is not fatal and deliberately not reported — the wrapper
+    # retries this from its own poll loop, so the cost of losing the call is that the phone
+    # shows this session as unreachable for a few seconds.
+    _mark_verified_quietly(claude_session_id, token, args.backend_url)
 
     write_private_json(
         marker_path(claude_session_id),
@@ -936,18 +860,17 @@ def cmd_connect(args: argparse.Namespace) -> int:
             "name": registered_name,
             "repo_path": repo_path,
             "registered_at": _now_iso(),
-            # Which channel process this session was bound to. `/audiochatty-disconnect`
+            # Which wrapper process this session was bound to. `/audiochatty-disconnect`
             # unbinds by rendezvous file rather than by this, so it is here to make a
             # confusing session debuggable, not to be trusted — a pid is reused eventually.
-            "channel_pid": channel.get("pid"),
-            "channel_port": channel.get("port"),
+            "wrapper_pid": wrapper.get("pid"),
+            "wrapper_port": wrapper.get("port"),
             # This very turn ends with the model relaying the line printed below, and the
             # marker it would be checked against already exists. `consume_skip_next_turn`
             # spends this on that turn so registration itself is never a message.
             #
-            # It is now also the turn the channel's handshake lands in — the `/bind` above
-            # injects one — so the flag covers both halves of setup with a single turn,
-            # which is the right number: the user watched all of it happen.
+            # It used to cover the channel handshake's turn as well. There is no handshake
+            # now (W8), so it is back to covering exactly what its name says.
             "skip_next_turn": True,
         },
     )
@@ -984,7 +907,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("This session is NOT registered — nothing from it is being sent.")
         print("Run /audiochatty-connect [name] to start.")
 
-    _print_channel_status(claude_session_id, registered=bool(marker))
+    _print_wrapper_status(claude_session_id, registered=bool(marker))
 
     others = _other_registered_sessions(claude_session_id)
     if others:
@@ -994,54 +917,59 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_channel_status(claude_session_id: str, *, registered: bool) -> None:
+def _print_wrapper_status(claude_session_id: str, *, registered: bool) -> None:
     """The return path, from files this machine owns.
 
-    Still no network, including no loopback call to the channel: `server.ts` writes `bound`
-    and `verified` into its own rendezvous file as they change, so reading the file answers
-    the same question a `GET /status` would. That keeps the promise this command makes —
-    nothing here can be slow, and nothing here can fail because something else is down.
+    Still no network, including no loopback call to the wrapper: it writes `bound` and
+    `verified` into its own rendezvous file as they change, so reading the file answers the
+    same question a `GET /status` would. That keeps the promise this command makes — nothing
+    here can be slow, and nothing here can fail because something else is down.
 
     This is the command a confused user runs, so it names the *cause* where it can tell.
-    An unverified channel has several, and only two of them are visible from here; the flag
-    is one of those two, and it is by far the most common.
+    There is one fewer cause to name than there used to be: the old "connected but
+    unconfirmed because no flag was passed" case cannot happen, since verification is now
+    set at bind time rather than proven on a later turn (W8).
     """
-    channel, problem = find_channel(claude_session_id)
+    wrapper, problem = find_wrapper(claude_session_id)
 
-    if problem == "ambiguous":
-        print("More than one audiochatty channel matches this terminal, so audiochatty")
-        print("won't bind any of them. Close the other sessions started from this window.")
+    if problem == "session_mismatch":
+        print("This session is running inside an audiochatty wrapper that belongs to a")
+        print("different session — a plain `claude` started from inside a wrapped one. It")
+        print("can't be talked to, and connecting it would type into the outer terminal.")
         return
-    if channel is None:
-        print("No audiochatty channel is running for this session, so it can't be told what")
-        print("to do next. Start the session again with:")
-        print(f"    {LAUNCH_COMMAND}")
+    if wrapper is None:
+        print("This session has no audiochatty return path, so it can't be told what to do")
+        print("next. Exit it and start Claude Code with:")
+        print(f"    {RUN_COMMAND}")
         return
 
-    bound_to_us = str(channel.get("claude_session_id") or "") == claude_session_id
+    # The `claude_session_id` guard matters: without it an *unbound* wrapper (whose
+    # `claude_session_id` is null, so `""`) reads as bound to us whenever we could not work
+    # out our own session id either. Two unknowns comparing equal is not a match.
+    bound_to_us = (
+        bool(claude_session_id)
+        and str(wrapper.get("claude_session_id") or "") == claude_session_id
+    )
     if not bound_to_us:
         if registered:
-            # A marker with an unbound channel is the shape a `/clear` cannot produce and a
-            # channel restart can: the process this session bound to is gone and a new one
-            # took its place, holding no binding.
-            print("Its audiochatty channel isn't connected, so it can't receive instructions.")
-            print("Run /audiochatty-connect again to reconnect it.")
+            # A marker with an unbound wrapper is the shape a `/clear` cannot produce and
+            # `/audiochatty-disconnect` on the wrapper side can: the registration outlived
+            # the binding.
+            print("Its audiochatty return path isn't connected, so it can't receive")
+            print("instructions. Run /audiochatty-connect again to reconnect it.")
         else:
-            print("An audiochatty channel is running and waiting to be connected.")
+            print("An audiochatty wrapper is running and waiting to be connected.")
         return
 
-    if channel.get("verified"):
+    if wrapper.get("verified"):
         print("You can talk to this session from audiochatty — the return path is confirmed.")
         return
 
-    print("Its audiochatty channel is connected but unconfirmed, so audiochatty will say")
-    print("this session can't be talked to.")
-    if channels_flag_names_us(claude_pid()) is False:
-        print("The reason is that this session was started without the channel flag:")
-        print(f"    {LAUNCH_COMMAND}")
-    else:
-        print("It confirms itself on the first turn after connecting, so finish a turn and")
-        print("check again. If it stays this way, run /audiochatty-connect again.")
+    # Only reachable from a hand-edited rendezvous file: the wrapper sets `verified` in the
+    # same write as `bound`. Worth a line rather than silence, because the alternative is a
+    # status command that prints nothing at all about the half the user asked about.
+    print("Its audiochatty return path is connected but not confirmed, so audiochatty will")
+    print("say this session can't be talked to. Run /audiochatty-connect again.")
 
 
 def _other_registered_sessions(claude_session_id: str) -> list[str]:
@@ -1062,7 +990,7 @@ def _other_registered_sessions(claude_session_id: str) -> list[str]:
 
 
 def cmd_disconnect(args: argparse.Namespace) -> int:
-    """Remove the marker, unbind the channel, then tell the backend.
+    """Remove the marker, unbind the wrapper, then tell the backend.
 
     **The marker goes first, and that ordering is the whole point.** The marker is what
     the Stop hook consults, so deleting it stops the flow of turns immediately and
@@ -1072,9 +1000,9 @@ def cmd_disconnect(args: argparse.Namespace) -> int:
     they closed.
 
     The unbind is second for the same reason and by the same argument: it is local, it
-    cannot fail in a way that matters, and it stops the *other* direction — a channel that
+    cannot fail in a way that matters, and it stops the *other* direction — a wrapper that
     stays bound keeps polling for instructions addressed to a session the user has just
-    closed, and would deliver one into this terminal.
+    closed, and would type one into this terminal.
     """
     claude_session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not claude_session_id:
@@ -1084,13 +1012,18 @@ def cmd_disconnect(args: argparse.Namespace) -> int:
     marker = load_marker(claude_session_id)
     marker_path(claude_session_id).unlink(missing_ok=True)
 
-    # By rendezvous file rather than by the marker's `channel_port`: the file is what says
-    # a *live* process is on that port and which session it currently holds, and a port
+    # By rendezvous file rather than by the marker's `wrapper_port`: the file is what says a
+    # *live* process is on that port and which session it currently holds, and a port
     # remembered from an hour ago may belong to something else entirely by now.
+    #
+    # Every live wrapper is scanned rather than just the one the environment names, and the
+    # filter is the binding rather than the pid. That is deliberate: this has to work in the
+    # session that is being retired even if its wrapper's variables never made it here, and
+    # a wrapper bound to *this* session is ours by definition however we found it.
     token = device_token()
-    for channel in read_channels():
-        if str(channel.get("claude_session_id") or "") == claude_session_id:
-            unbind_channel(channel, token)
+    for wrapper in read_wrappers():
+        if str(wrapper.get("claude_session_id") or "") == claude_session_id:
+            unbind_wrapper(wrapper, token)
 
     if not marker:
         print("This session wasn't registered with audiochatty.")
@@ -1122,6 +1055,33 @@ def _end_session_quietly(claude_session_id: str, token: str, base: str | None) -
         )
     except (ApiError, TransportError):
         pass
+
+
+def _mark_verified_quietly(claude_session_id: str, token: str, base: str | None) -> bool:
+    """`POST /agent/session/verified` — the whole of W8, in one call that may fail.
+
+    The inbox reads `agent_sessions.channel_verified_at` to decide whether the user is
+    offered a reply at all, so this is the call that makes a connected session *look*
+    connected on the phone. It is still not worth failing `connect` over: the wrapper retries
+    it from its own poll loop, so a lost call costs a few seconds of the phone saying "you
+    can't talk to this one" and nothing else. Nothing is printed either way — a user who
+    just watched `connect` succeed has no use for a warning about a call that will be made
+    again without them.
+
+    The column keeps its old name on purpose. There is no channel any more, but renaming it
+    is a migration plus four call sites for no behaviour change, and it still means exactly
+    what it always meant: this session can be reached.
+    """
+    try:
+        post(
+            "/agent/session/verified",
+            {"claude_session_id": claude_session_id},
+            token=token,
+            base_url=backend_url(base),
+        )
+    except (ApiError, TransportError):
+        return False
+    return True
 
 
 # -- the ingest calls the hooks make ---------------------------------------------------

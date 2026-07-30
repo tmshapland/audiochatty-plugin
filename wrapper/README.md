@@ -28,7 +28,7 @@ session is connected:
 | **Who can make it type** | A local process that (a) can reach a loopback port on this machine and (b) can read your `~/.audiochatty/credentials.json`. On a single-user laptop that is you and anything you run. There is no remote path in: the wrapper never accepts an inbound connection from off the machine. |
 | **What reaches it from outside** | Only messages your own audiochatty workspace addressed to *this* session, fetched by the wrapper asking the backend — never pushed. |
 | **When it's off** | Until `/audiochatty-connect` runs in the session, the wrapper is inert: it proxies your terminal and does nothing else. No polling, no network, and `/inject` refuses. |
-| **On disk** | One file: `~/.audiochatty/wrappers/<pid>.json`, mode 0600, deleted when the wrapper exits. Your device token is **not** in it. |
+| **On disk** | `~/.audiochatty/wrappers/<pid>.json`, mode 0600, deleted when the wrapper exits — plus, once a session has been delivered to, `<claude-session-id>.delivered.json` beside it, which is the list of instruction ids already typed in and outlives the process on purpose. Your device token is in neither. |
 | **Platform** | macOS and Linux. The pseudo-terminal this is built on does not exist on Windows. |
 
 The old version of this — a Claude Code plugin — could only *push a notification* into a
@@ -75,6 +75,7 @@ the rest of `scripts/`, which the previous Bun-based version had broken.
 | `--verbose` | Print the port and rendezvous path to stderr at startup. Off by default, because a wrapped session should look exactly like an unwrapped one. |
 | `AUDIOCHATTY_DEBUG=1` | Narrate what the wrapper is doing, on stderr. |
 | `AUDIOCHATTY_HOME` | Move `~/.audiochatty` elsewhere. Used by the tests. |
+| `AUDIOCHATTY_POLL_*` | `ACTIVE`, `IDLE`, `COOLDOWN`, `TIMEOUT` — the poll cadences in seconds. Undocumented as options for the same reason `--claude-bin` is: the defaults were reasoned about, and the tests are the only caller that needs a compressed version of them. |
 
 ---
 
@@ -86,6 +87,20 @@ the rest of `scripts/`, which the previous Bun-based version had broken.
    resizes, Ctrl-C, and the child's exit code all pass through, which is why a wrapped session
    feels like an unwrapped one.
 4. Once connected, it asks the backend for anything you have spoken, and types it in.
+
+Step 4 is a poll, not a push: `GET /agent/inbound` every 5 seconds while something could
+plausibly be in flight, every 30 once it has been quiet, and not at all for a minute after a
+failed request. A laptop behind NAT cannot be pushed to, and a backend asleep on a free tier
+must not turn into a hot loop.
+
+Delivery is **at least once**, and the thing that makes it effectively exactly once is
+`~/.audiochatty/wrappers/<claude-session-id>.delivered.json` — a list of the instructions
+already typed into this session. It is keyed by session rather than by process precisely so
+that it survives a restart, which is the one moment it matters: relaunch, reconnect, and an
+instruction the backend never heard the acknowledgement for is skipped rather than typed a
+second time. The order is always *type it in → write that file → tell the backend*, because
+a crash in the first gap would duplicate an instruction and a crash in the second only
+duplicates a dedupe.
 
 Two behaviours are worth knowing because they look like bugs and are not:
 
@@ -106,16 +121,15 @@ the environment variables — is frozen and documented in `__main__.py`'s docstr
 
 ---
 
-## Not yet confirmed against the real Claude Code interface
+## Confirmed against the real Claude Code interface
 
 The test suite (`tests/test_wrapper.py`) drives the real wrapper with a real pseudo-terminal
-and a fake `claude`, so it proves the mechanism. Two things it cannot prove, because they are
-questions about Claude Code's own prompt rather than about the terminal:
+and a fake `claude`, so it proves the mechanism. Two things it structurally cannot prove,
+because they are questions about Claude Code's own prompt rather than about the terminal —
+both since answered by hand, 2026-07-29 (`wrapper_return_path_plan.md` Phase 0, W5 and W7):
 
-- **that a bracketed paste arrives as one multi-line message** rather than as several. If it
-  does not, the fallback is to flatten each instruction onto a single line, which loses its
-  paragraph breaks.
-- **that an instruction typed while Claude Code is mid-turn is queued** rather than dropped.
-
-Both are `wrapper_return_path_plan.md` Phase 0 spikes (W5 and W7) and need a person at a
-keyboard. Until they are signed off, treat the paste format as provisional.
+- **a bracketed paste arrives as one multi-line message**, line breaks intact. So the paste
+  format here is the real one, and the single-line-flattening fallback was never needed.
+- **an instruction typed while Claude Code is mid-turn is queued**, and acted on when the
+  turn finishes. Typed while idle, it is acted on immediately. So the wrapper needs no
+  turn-boundary logic of its own.
