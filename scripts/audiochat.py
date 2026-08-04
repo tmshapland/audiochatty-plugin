@@ -704,6 +704,7 @@ def _login_start(base: str, label: str | None) -> int:
     print()
     print(f"It expires in {int(expires_in // 60)} minutes.")
     print("Once you've entered it, run /audiochatty-login again to finish.")
+    print("After you enter the code, run /audiochatty:audiochatty-login again here in Claude Code.")
     return 0
 
 
@@ -800,11 +801,10 @@ def _login_finish(response: dict, base: str) -> int:
     # descriptions, the README, and here — and this is the only one whose words we fully
     # control and the only one the user is looking at when the step is actually due. So it
     # carries the command and the reason, not a pointer to somewhere else that carries them.
-    print("Next, let's create a shortcut command for starting an audiochatty session.")
+    print("Next, let's create a shortcut command for starting an audiochatty session. Quit Claude Code and add this line to your shell profile (~/.zshrc or ~/.bashrc).")
     print()
     print(f'    alias audiochatty="{WRAPPER_LAUNCHER}"')
-    print()
-    print()
+    print('')
     print("After you add the shortcut to your shell profile (~/.zshrc or ~/.bashrc), open a new terminal so it takes effec t.")
     print()
     print("To connect Audiochatty to a Claude Code session, start Claude Code with the shortcut:")

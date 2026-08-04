@@ -55,6 +55,7 @@ Then, once per machine:
 
   It expires in 10 minutes.
   Once you've entered it, run /audiochatty-login again to finish.
+  After you enter the code, run /audiochatty:audiochatty-login again here in Claude Code.
 ```
 
 Open audiochatty in a browser — you're already signed in — go to **Settings → Link a coding

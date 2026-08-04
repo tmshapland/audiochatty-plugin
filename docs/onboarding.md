@@ -55,6 +55,7 @@ Start a Claude session. Then, run it once to get a pairing code:
 
   It expires in 10 minutes.
   Once you've entered it, run /audiochatty-login again to finish.
+  After you enter the code, run /audiochatty:audiochatty-login again here in Claude Code.
 ```
 
 Enter that code at **audiochatty → Settings → Link a coding agent** in your browser
