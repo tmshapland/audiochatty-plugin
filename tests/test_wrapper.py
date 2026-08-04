@@ -28,6 +28,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -559,7 +560,9 @@ class TestInjection(WrapperTestCase):
         text = "first line\nsecond line\n\nlast paragraph"
         self.assertEqual(session.call("/inject", {"token": TOKEN, "text": text})[0], 202)
 
-        saw = wait_for(lambda: b"\x1b[201~" in session.child_saw() and session.child_saw())
+        # Waits for the *Enter*, not just the closing marker: those are two writes now, a
+        # `SUBMIT_DELAY` apart, so stopping at `\x1b[201~` would race the thing being asserted.
+        saw = wait_for(lambda: session.child_saw().endswith(b"\x1b[201~\r") and session.child_saw())
         self.assertIn(b"\x1b[200~", saw)
         # One paste, one Enter, and the line breaks are CRs inside it — what a terminal
         # emulator sends when a human pastes.
@@ -684,7 +687,10 @@ class TestDelivery(WrapperTestCase):
             session = self.start()
             session.bind(backend_url=backend.url)
 
-            saw = wait_for(lambda: b"\x1b[201~" in session.child_saw() and session.child_saw())
+            # The Enter, not just the closing marker — two writes, `SUBMIT_DELAY` apart.
+            saw = wait_for(
+                lambda: session.child_saw().endswith(b"\x1b[201~\r") and session.child_saw()
+            )
             self.assertEqual(saw.count(b"\x1b[200~"), 1)
             self.assertEqual(saw.count(b"\x1b[201~"), 1)
             body = saw.split(b"\x1b[200~", 1)[1].split(b"\x1b[201~", 1)[0]
@@ -776,7 +782,7 @@ class TestDelivery(WrapperTestCase):
         It used to hold for every unbound wrapper, and Phase 2 measured it. Phase 6.5 spends
         it knowingly: a paired machine now registers at launch (`TestConnectOnLaunch`). What
         survives — and what this pins — is that an *unpaired* machine still does nothing at
-        all, so `audiochatty run` before `/audiochatty-login` is indistinguishable from
+        all, so `audiochatty run` before the machine is paired is indistinguishable from
         plain `claude`.
         """
         (self.home / "credentials.json").unlink()
@@ -1136,8 +1142,90 @@ class TestSanitizer(unittest.TestCase):
         self.assertEqual(inject.encode_paste("   \n  "), b"")
         self.assertEqual(inject.encode_paste("\x1b\x00"), b"")
 
-    def test_encoding_is_a_paste_plus_one_enter(self):
-        self.assertEqual(inject.encode_paste("a\nb"), b"\x1b[200~a\rb\x1b[201~\r")
+    def test_encoding_is_a_paste_and_carries_no_enter(self):
+        """The Enter is not part of the encoding — `Injector.flush` writes it separately, a
+        beat later, because the TUI swallows one that arrives in the same read."""
+        self.assertEqual(inject.encode_paste("a\nb"), b"\x1b[200~a\rb\x1b[201~")
+
+
+class TestSubmitIsASeparateWrite(unittest.TestCase):
+    """The regression that made an instruction land in the prompt and never run.
+
+    Sent as one write, `\\x1b[201~\\r` is swallowed by Claude Code's TUI often enough to be a
+    coin flip — measured against 2.1.221, 2 of 6 single-line instructions never submitted.
+    A separate `os.write` is *not* sufficient (the bytes coalesce into one pty read); only a
+    real gap is. So what this pins is the gap, at the one place that can guarantee it.
+    """
+
+    def setUp(self):
+        import tty
+
+        self.master, self.slave = os.openpty()
+        # Raw, like Claude Code's TUI and like `FakeClaude`. Left canonical, the slave would
+        # not surface a read until a newline arrived — so a paste with no trailing Enter,
+        # which is exactly what this class asserts on, would look like nothing at all.
+        tty.setraw(self.slave)
+        self.addCleanup(os.close, self.master)
+        self.addCleanup(os.close, self.slave)
+
+    def read_child(self) -> bytes:
+        """Everything the child can see so far, without blocking."""
+        import select as _select
+
+        seen = b""
+        while _select.select([self.slave], [], [], 0.05)[0]:
+            seen += os.read(self.slave, 65536)
+        return seen
+
+    def test_the_enter_lands_only_after_the_delay(self):
+        injector = inject.Injector(quiet_period=0.0, submit_delay=0.2)
+        injector.enqueue("run the tests", message_id="m1")
+
+        injector.flush(self.master)
+        first = self.read_child()
+        self.assertTrue(first.endswith(b"\x1b[201~"), f"paste not written alone: {first!r}")
+        self.assertNotIn(b"\r", first.split(b"\x1b[200~", 1)[1])
+
+        # Still inside the gap: flushing again must not submit early.
+        self.assertEqual(injector.flush(self.master), 0)
+        self.assertEqual(self.read_child(), b"")
+        self.assertEqual(injector.pending(), 1, "an unsubmitted paste is not delivered")
+        self.assertEqual(injector.drain_delivered(), [])
+
+        time.sleep(0.25)
+        self.assertEqual(injector.flush(self.master), 1)
+        self.assertEqual(self.read_child(), b"\r")
+        self.assertEqual(injector.drain_delivered(), ["m1"])
+        self.assertEqual(injector.pending(), 0)
+
+    def test_the_loop_is_told_to_come_back_for_the_enter(self):
+        """The gap only works if `select` does not then sleep a full second through it."""
+        injector = inject.Injector(quiet_period=0.0, submit_delay=0.2)
+        injector.enqueue("run the tests", message_id="m1")
+        injector.flush(self.master)
+        self.assertLessEqual(injector.next_timeout(1.0), 0.2)
+
+    def test_two_instructions_do_not_merge_into_one_prompt(self):
+        """The second paste must not go in before the first one's Enter, or two spoken
+        instructions arrive as a single run-on prompt."""
+        injector = inject.Injector(quiet_period=0.0, submit_delay=0.1)
+        injector.enqueue("first instruction", message_id="m1")
+        injector.enqueue("second instruction", message_id="m2")
+
+        injector.flush(self.master)
+        seen = self.read_child()
+        self.assertEqual(seen.count(b"\x1b[200~"), 1, "both pastes went in at once")
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and injector.pending():
+            injector.flush(self.master)
+            seen += self.read_child()
+            time.sleep(0.02)
+
+        # The shape that matters: paste, Enter, paste, Enter — never paste, paste.
+        skeleton = re.sub(rb"[^\r]*?\x1b\[201~", b"<paste>", seen.replace(b"\x1b[200~", b""))
+        self.assertEqual(skeleton, b"<paste>\r<paste>\r")
+        self.assertEqual(sorted(injector.drain_delivered()), ["m1", "m2"])
 
 
 class TestParseInbound(unittest.TestCase):

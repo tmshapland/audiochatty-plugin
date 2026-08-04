@@ -27,7 +27,7 @@ session is connected:
 | **What that means for prompts** | It types into a live terminal, so text it sends can land on a permission prompt or any other keypress-driven UI. Answering those by voice is a deliberate, separate, still-unbuilt feature (`wrapper_return_path_plan.md` Phase 9) — but the *capability* is inherent to typing into a terminal and exists the moment you use this. |
 | **Who can make it type** | A local process that (a) can reach a loopback port on this machine and (b) can read your `~/.audiochatty/credentials.json`. On a single-user laptop that is you and anything you run. There is no remote path in: the wrapper never accepts an inbound connection from off the machine. |
 | **What reaches it from outside** | Only messages your own audiochatty workspace addressed to *this* session, fetched by the wrapper asking the backend — never pushed. |
-| **When it's off** | On a machine you have not paired with `/audiochatty-login`, the wrapper is inert: it proxies your terminal and does nothing else. No polling, no network, and `/inject` refuses. On a paired machine it connects itself at launch, so it is *on* from the moment you run it — `/audiochatty-disconnect` is how you turn one session off again. |
+| **When it's off** | On a machine you have not paired, the wrapper is inert: it proxies your terminal and does nothing else. No polling, no network, and `/inject` refuses. On a paired machine it connects itself at launch, so it is *on* from the moment you run it — `/audiochatty-disconnect` is how you turn one session off again. |
 | **On disk** | `~/.audiochatty/wrappers/<pid>.json`, mode 0600, deleted when the wrapper exits — plus, once a session has been delivered to, `<claude-session-id>.delivered.json` beside it, which is the list of instruction ids already typed in and outlives the process on purpose. Your device token is in neither; the rendezvous file does carry the reason a launch connect failed, so `/audiochatty-status` can explain a session that never appeared. |
 | **Platform** | macOS and Linux. The pseudo-terminal this is built on does not exist on Windows. |
 
@@ -138,3 +138,13 @@ both since answered by hand, 2026-07-29 (`wrapper_return_path_plan.md` Phase 0, 
 - **an instruction typed while Claude Code is mid-turn is queued**, and acted on when the
   turn finishes. Typed while idle, it is acted on immediately. So the wrapper needs no
   turn-boundary logic of its own.
+
+A third question turned out to be hiding behind the first, and the hand-check missed it —
+**the Enter has to be its own write, `inject.SUBMIT_DELAY` after the paste.** Sent in the same
+write as the closing marker, Claude Code's TUI swallows it: the instruction appears in the
+prompt box, complete and correct, and sits there until a human presses Return. It is a race,
+not a rule, which is why a spike passed — measured against 2.1.221 on 2026-08-04, 4 of 6
+single-line instructions submitted and 2 hung, while the multi-line ones a person would
+naturally test with submitted every time. A separate `os.write` is not enough on its own (the
+bytes coalesce into one pty read); the gap is what does the work. 30ms sufficed in every
+trial, 150ms ships, and `tests/test_wrapper.py::TestSubmitIsASeparateWrite` pins it.

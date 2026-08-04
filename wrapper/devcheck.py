@@ -125,7 +125,10 @@ def main(argv: list[str] | None = None) -> int:
 
     device_token = token()
     if not device_token:
-        sys.exit(f"no device token in {home()}/credentials.json — run /audiochatty-login first")
+        sys.exit(
+            f"no device token in {home()}/credentials.json — "
+            "run /audiochatty-pair-start then /audiochatty-pair-finish first"
+        )
 
     if args.command == "bind":
         request(record, "bind", {

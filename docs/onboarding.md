@@ -17,8 +17,8 @@ Two independent, opt-in directions:
 
 Both halves stop the moment you disconnect or disable the plugin.
 
-**Scope, up front, because it's the part people get wrong:** install, `/audiochatty-login`,
-and making `audiochatty` a command are one-time, per machine. Starting the session with
+**Scope, up front, because it's the part people get wrong:** install, pairing, and making
+`audiochatty` a command are one-time, per machine. Starting the session with
 `audiochatty run` is **not** — it repeats for *every single Claude Code launch* you want
 audiochatty in at all, with no way to make it stick.
 
@@ -42,44 +42,52 @@ claude plugin install audiochatty@audiochatty
 Until you pair (next step), the plugin is inert — no background process, no network
 calls.
 
-## 2. Pair the machine — `/audiochatty-login` (once per machine)
+## 2. Pair the machine — `/audiochatty-pair-start` then `/audiochatty-pair-finish` (once per machine)
 
-Start a Claude session. Then, run it once to get a pairing code:
+Pairing is two commands with the browser in between. Start a Claude session, then run the
+first one to get a pairing code:
 
 ```
-> /audiochatty-login
+> /audiochatty-pair-start
 
   Open https://audiochatty.com/link and enter this code:
 
         WXYZ-1234
 
   It expires in 10 minutes.
-  Once you've entered it, run /audiochatty-login again to finish.
-  After you enter the code, run /audiochatty:audiochatty-login again here in Claude Code.
+
+  After you enter the code, run /audiochatty:audiochatty-pair-finish here in Claude Code.
 ```
 
 Enter that code at **audiochatty → Settings → Link a coding agent** in your browser
-(you're already signed in there). Then run the same command again in Claude to complete pairing:
+(you're already signed in there). Then run the second command in Claude to complete pairing:
 
 ```
-> /audiochatty-login
+> /audiochatty-pair-finish
   Linked to <your workspace> as <your name>.
 
-  One more step, and it's per session rather than per machine: a session can only
-  be talked to if you start Claude Code through audiochatty. Start it with:
-
-      audiochatty run
-
-  That's the whole of it — it connects the session for you, so there's nothing to
-  run afterwards. It's the same Claude Code you already use: same terminal, nothing
-  to load, no warning, with a return path attached. A session started with plain
-  `claude` has no return path, so there is nothing there to tell it what to do.
-
-  If `audiochatty` isn't a command on this machine yet, that is one line in your
-  shell profile:
+  Next, let's create a shortcut command for starting an audiochatty session. Quit
+  Claude Code and add this line to your shell profile (~/.zshrc or ~/.bashrc).
 
       alias audiochatty="/path/to/audiochat-plugin/wrapper/audiochatty"
+
+  After you add the shortcut to your shell profile (~/.zshrc or ~/.bashrc), open a
+  new terminal so it takes effect.
+
+  To connect Audiochatty to a Claude Code session, start Claude Code with the shortcut:
+      audiochatty run --name [name]
+
+  That connects the session for you — there's nothing else to run inside it.
 ```
+
+**Why two commands.** A slash command's output is substituted into the prompt after the
+command exits, so a single command that minted a code and then waited for you to approve it
+would only show you the code once it had given up waiting. The two halves are named
+separately so the second one reads as the next step rather than as a retry of the first —
+and neither minds being run out of order. `/audiochatty-pair-start` with a code already in
+flight shows you that same code again instead of replacing it, and
+`/audiochatty-pair-finish` with nothing pending says whether you're already paired or never
+started.
 
 **The alias is one-time; `audiochatty run` is not.** Add the alias (or put
 `wrapper/audiochatty` on your `PATH`) once and never think about it again. But the command
@@ -213,7 +221,8 @@ from inside the session instead. Nothing about this is visible to you — `audio
 
 | Command | What it does | Network call? |
 | --- | --- | --- |
-| `/audiochatty-login` | Pair this machine. Once per machine. | Yes |
+| `/audiochatty-pair-start` | Get a pairing code for this machine. Once per machine. | Yes |
+| `/audiochatty-pair-finish` | Finish that pairing once the code has been entered in the browser. | Yes |
 | `/audiochatty-connect [name]` | Rarely needed — see section 4. Retry a failed connect, rename this session, or reconnect a disconnected one. | Yes |
 | `/audiochatty-status` | Is this machine paired, is this session connected, can it be talked to, and why not. | No — entirely local |
 | `/audiochatty-disconnect` | Stop sending and receiving for this session. The machine stays paired and the session keeps running. | Yes — after the local teardown, and a failure is swallowed |
@@ -275,7 +284,8 @@ order of likelihood:
    check you aren't mid-way through typing a line: the wrapper deliberately waits for you to
    pause rather than typing over you, so a slow instruction is often that working.
 5. **Backend asleep/down.** Silent drop by design; wait, or check `/audiochatty-status`.
-6. **Device revoked.** Everything 401s silently — re-run `/audiochatty-login`.
+6. **Device revoked.** Everything 401s silently — pair again with
+   `/audiochatty-pair-start` and `/audiochatty-pair-finish`.
 
 Debug logging: set `AUDIOCHATTY_DEBUG=1` for one stderr line per hook run, more detail from
 `/audiochatty-connect` about which wrapper it found and why it accepted or refused it, and a

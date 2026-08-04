@@ -7,13 +7,20 @@
 what makes "read the repo, then install it" an honest offer (§5), and it is easy to break
 with one convenient import. There is nothing to add here that is worth a dependency.
 
-Four subcommands, one per slash command, plus the three hook scripts that import this
+Five subcommands, one per slash command, plus the three hook scripts that import this
 module:
 
-    login       the RFC 8628 device flow — mint a code, then redeem it
-    connect     register this Claude Code session under a name
-    status      local-only: is this machine paired, is this session registered
-    disconnect  retire this session
+    pair-start   the RFC 8628 device flow, first half — mint a code and show it
+    pair-finish  the second half — redeem that code for this machine's token
+    connect      register this Claude Code session under a name
+    status       local-only: is this machine paired, is this session registered
+    disconnect   retire this session
+
+**Pairing is two subcommands because it is two invocations** (see `cmd_pair_start`), and
+it used to be one — a single `login` that dispatched on whether `pending.json` held a live
+code. The mechanism is unchanged; what changed is that the user can now tell the two halves
+apart by name instead of being told to run the same command again and hope it did something
+different.
 
 **`connect` is no longer a step in the happy path** (`wrapper_return_path_plan.md` W13).
 `audiochatty run` connects the session it starts, and `scripts/session_start_hook.py`
@@ -81,10 +88,10 @@ HOOK_TIMEOUT = 4.0
 # the header: a session registration is a few hundred bytes.
 GZIP_MIN_BYTES = 4_096
 
-# How long `login` keeps polling in one invocation before handing the terminal back.
+# How long `pair-finish` keeps polling in one invocation before handing the terminal back.
 # Bounded on purpose: a slash command that does not return is a slash command that has
 # hung, and the flow is resumable by running it again.
-DEFAULT_LOGIN_WAIT = 45.0
+DEFAULT_PAIR_WAIT = 45.0
 
 USER_AGENT = "audiochatty-plugin/0.1.0"
 
@@ -594,12 +601,10 @@ def _print_relaunch(reason: str) -> None:
     print()
     print(f"    {RUN_COMMAND}")
     print()
-    print("That is the same Claude Code you already use — same terminal, no plugin to load,")
-    print("no warning — and it connects the session itself, so there's nothing to run after")
-    print("it.")
+    print("That starts the same Claude Code you already use, but messages are sent to Audiochatty.")
     print()
-    print("If `audiochatty` isn't a command on this machine yet, that is one line in your")
-    print("shell profile:")
+    print("If `audiochatty` isn't a command on this machine yet, add it to your")
+    print("shell profile (i.e., `sudo vi ~/.zshrc` ):")
     print()
     print(f'    alias audiochatty="{WRAPPER_LAUNCHER}"')
 
@@ -613,26 +618,39 @@ def _print_nested_session() -> None:
     print()
     print("Connecting it would type what you say into the outer terminal rather than this")
     print("one, so nothing was registered. The session you started with `audiochatty run`")
-    print("is already connected — talk to that one.")
+    print("is already connected.")
 
 
-# -- login -----------------------------------------------------------------------------
+# -- pairing ---------------------------------------------------------------------------
+#
+# The device flow, in two invocations — and since 👤 2026-08-04 the two invocations are two
+# *commands*: `pair-start` mints a code, `pair-finish` redeems it. `pending.json` is what
+# connects them.
+#
+# **Why it cannot be one command.** A slash command's `` !`…` `` output is preprocessing:
+# it is substituted into the prompt *after* the command exits, so nothing it prints is
+# visible while it runs. A single invocation that minted a code and then polled would
+# therefore show the user the code only once polling had already given up. That constraint
+# forces two invocations; it does not force two names. The names are the part that was
+# chosen, because "run the same command again" reads as a retry rather than as the next
+# step, and a user who can't tell the halves apart can't tell which one failed either.
+#
+# So each command has to be safe to run in the wrong state, and say what state it is in
+# rather than silently doing the other half's job — `pair-start` holding a live code
+# re-prints it instead of minting a second one, and `pair-finish` with nothing pending
+# distinguishes "already paired" from "never started".
+#
+# The `device_code` lives in the pending file and is never printed: it is the half of this
+# flow that must not reach the transcript.
 
 
-def cmd_login(args: argparse.Namespace) -> int:
-    """The device flow, in two invocations.
+def cmd_pair_start(args: argparse.Namespace) -> int:
+    """Mint a pairing code — or re-show the one already in flight.
 
-    **Why two.** A slash command's `` !`…` `` output is preprocessing: it is substituted
-    into the prompt *after* the command exits, so nothing it prints is visible while it
-    runs. A single invocation that minted a code and then polled would therefore show the
-    user the code only once polling had already given up. So the first run mints and
-    returns immediately, and the second — after the user has approved in the browser —
-    collects the token. `pending.json` is what connects them.
-
-    The second run still polls, for `--wait` seconds, so a user who approves promptly and
-    runs the command again lands in the middle of a successful poll rather than having to
-    time it. The `device_code` lives in that pending file and is never printed: it is the
-    half of this flow that must not reach the transcript.
+    Re-showing rather than re-minting is what makes this safe to run twice. Someone who
+    lost their scrollback wants *the* code, not another one, and a second live code would
+    leave the first sitting unexpired for them to type into `/link` by mistake. `--reset`
+    is how you throw one away on purpose.
     """
     base = backend_url(args.backend_url)
     pending = read_json(pending_path())
@@ -642,8 +660,79 @@ def cmd_login(args: argparse.Namespace) -> int:
         pending = {}
 
     if _pending_is_live(pending) and pending.get("backend_url") == base:
-        return _login_collect(pending, base, args.wait)
-    return _login_start(base, args.label)
+        return _pair_show_pending(pending)
+    return _pair_mint(base, args.label)
+
+
+def cmd_pair_finish(args: argparse.Namespace) -> int:
+    """Redeem the pending code for this machine's device token.
+
+    Polls for `--wait` seconds rather than checking once, so a user who approves in the
+    browser and comes straight back lands in the middle of a successful poll instead of
+    having to time their return.
+    """
+    base = backend_url(args.backend_url)
+    pending = read_json(pending_path())
+
+    if _pending_is_live(pending) and pending.get("backend_url") == base:
+        return _pair_collect(pending, base, args.wait)
+    return _pair_nothing_pending(pending, base)
+
+
+def _pair_nothing_pending(pending: dict, base: str) -> int:
+    """There is no code to redeem, and which of the three reasons it is decides what to
+    say. An already-paired machine is not a mistake and must not be told off for one; a
+    dead code is a mistake with an obvious fix; never having started is neither."""
+    if pending.get("device_code"):
+        # Only liveness failed: the code timed out, or it was minted against a different
+        # backend than the one we are talking to now. Either way it is spent.
+        pending_path().unlink(missing_ok=True)
+        print("That pairing code expired.")
+        print()
+        print("Run /audiochatty:audiochatty-pair-start to get a new one.")
+        return 1
+
+    credentials = load_credentials()
+    if credentials.get("token"):
+        workspace = credentials.get("workspace_name") or "audiochatty"
+        who = credentials.get("profile_name")
+        print(
+            f"This machine is already paired to {workspace}"
+            + (f" as {who}." if who else ".")
+        )
+        print("Nothing is pending, so there is nothing to finish.")
+        print()
+        print("To pair it again, which replaces this machine's token, start over with")
+        print("/audiochatty:audiochatty-pair-start.")
+        return 0
+
+    print("No pairing has been started on this machine, so there is nothing to finish.")
+    print()
+    print("Run /audiochatty:audiochatty-pair-start first. It prints a code and a link;")
+    print("enter the code there, then come back and run this command.")
+    return 1
+
+
+def _pair_show_pending(pending: dict) -> int:
+    """Re-print the code that is already in flight.
+
+    Deliberately makes no network call: everything here comes out of `pending.json`, so it
+    still answers "what was my code again?" while the backend is unreachable.
+    """
+    try:
+        expires_at = float(pending.get("expires_at", 0))
+    except (TypeError, ValueError):
+        expires_at = 0.0
+    remaining = max(int(expires_at - time.time()), 0)
+
+    print("You already have a pairing code waiting to be entered:")
+    print()
+    print(f"      {pending.get('user_code')}")
+    print()
+    print(f"Open {pending.get('verification_uri')} and enter it. {remaining // 60}m left.")
+    print()
+    print("Then run /audiochatty:audiochatty-pair-finish here in Claude Code.")
+    return 0
 
 
 def _pending_is_live(pending: dict) -> bool:
@@ -655,7 +744,7 @@ def _pending_is_live(pending: dict) -> bool:
         return False
 
 
-def _login_start(base: str, label: str | None) -> int:
+def _pair_mint(base: str, label: str | None) -> int:
     """Mint a code and hand the terminal straight back."""
     existing = load_credentials()
     try:
@@ -704,11 +793,11 @@ def _login_start(base: str, label: str | None) -> int:
     print()
     print(f"It expires in {int(expires_in // 60)} minutes.")
     print()
-    print("After you enter the code, run /audiochatty:audiochatty-login again here in Claude Code to finish.")
+    print("After you enter the code, run /audiochatty:audiochatty-pair-finish here in Claude Code.")
     return 0
 
 
-def _login_collect(pending: dict, base: str, wait: float) -> int:
+def _pair_collect(pending: dict, base: str, wait: float) -> int:
     """Poll `/device/token` until the code is redeemed, the budget runs out, or the
     backend says stop. RFC 8628 §3.5: `authorization_pending` and `slow_down` mean keep
     going, anything else means stop."""
@@ -730,7 +819,7 @@ def _login_collect(pending: dict, base: str, wait: float) -> int:
             )
         except TransportError as exc:
             print(f"Could not reach audiochatty at {base} ({exc}).")
-            print("Your code is still valid — run /audiochatty-login again to retry.")
+            print("Your code is still valid. Run /audiochatty-pair-finish to retry.")
             return 1
         except ApiError as exc:
             error = str(exc.payload.get("error") or "")
@@ -739,42 +828,43 @@ def _login_collect(pending: dict, base: str, wait: float) -> int:
                     # The backend told us we are early. Its stated interval is the floor.
                     interval = max(interval, float(exc.payload.get("interval") or interval)) + 1
                 if time.time() + interval > min(deadline, expires_at):
-                    return _login_still_waiting(pending, expires_at)
+                    return _pair_still_waiting(pending, expires_at)
                 time.sleep(interval)
                 continue
             if error == "expired_token":
                 pending_path().unlink(missing_ok=True)
-                print("That code expired. Run /audiochatty-login to get a new one.")
+                print("That code expired. Run /audiochatty-pair-start to get a new one.")
                 return 1
             if error == "access_denied":
                 pending_path().unlink(missing_ok=True)
-                print("That pairing was declined. Run /audiochatty-login to start over.")
+                print("That pairing was declined. Run /audiochatty-pair-start to start over.")
                 return 1
             # `invalid_grant` covers a code that was already redeemed as well as one the
             # backend has never heard of — indistinguishable from here, and the fix is
             # the same either way.
             pending_path().unlink(missing_ok=True)
-            print("That pairing code is no longer valid. Run /audiochatty-login to start over.")
+            print("That pairing code is no longer valid. Run /audiochatty-pair-start to start over.")
             return 1
 
-        return _login_finish(response, base)
+        return _pair_complete(response, base)
 
 
-def _login_still_waiting(pending: dict, expires_at: float) -> int:
+def _pair_still_waiting(pending: dict, expires_at: float) -> int:
     remaining = max(int(expires_at - time.time()), 0)
     print(f"Still waiting for {pending.get('user_code')} to be approved.")
     print(f"Open {pending.get('verification_uri')} and enter it. {remaining // 60}m left.")
-    print("Then run /audiochatty:audiochatty-login again here in Claude Code.")
+    print("Then run /audiochatty:audiochatty-pair-finish again here in Claude Code.")
     return 0
 
 
-def _login_finish(response: dict, base: str) -> int:
+def _pair_complete(response: dict, base: str) -> int:
     """Store the token and say who we are. **The token is not printed here or anywhere
     else** — this function is the only place in the plugin that has ever seen it, and the
     file it writes is the only place it exists on this machine."""
     token = response.get("token")
     if not token:
-        print("Pairing failed: the backend returned no token. Run /audiochatty-login again.")
+        print("Pairing failed: the backend returned no token.")
+        print("Run /audiochatty-pair-start to start over.")
         return 1
 
     write_private_json(
@@ -801,15 +891,19 @@ def _login_finish(response: dict, base: str) -> int:
     # descriptions, the README, and here — and this is the only one whose words we fully
     # control and the only one the user is looking at when the step is actually due. So it
     # carries the command and the reason, not a pointer to somewhere else that carries them.
-    print("Next, let's create a shortcut command for starting an audiochatty session. Quit Claude Code and add this line to your shell profile (~/.zshrc or ~/.bashrc).")
+    print("Next, let's create a shortcut command for starting an audiochatty session. Quit Claude Code and add this line to your shell profile (sudo vi ~/.zshrc or sudo vi ~/.bashrc).")
     print()
     print(f'    alias audiochatty="{WRAPPER_LAUNCHER}"')
     print('')
-    print("After you add the shortcut to your shell profile (~/.zshrc or ~/.bashrc), open a new terminal so it takes effec t.")
+    print()
+    print("After you add the shortcut to your shell profile, open a new terminal so it takes effect.")
     print()
     print("To connect Audiochatty to a Claude Code session, start Claude Code with the shortcut:")
     print(f"    {RUN_COMMAND} --name [name]")
     print()
+    # W13: that command connects the session for you, so there is no third step to name
+    # here. Naming one would send every new user off to do something that does nothing.
+    print("That connects the session for you.")
     return 0
 
 
@@ -992,7 +1086,8 @@ def cmd_connect(args: argparse.Namespace) -> int:
     """
     token = device_token()
     if not token:
-        print("This machine isn't paired with audiochatty yet. Run /audiochatty-login first.")
+        print("This machine isn't paired with audiochatty yet. Run /audiochatty-pair-start,")
+        print("then /audiochatty-pair-finish once you've entered the code it gives you.")
         return 1
 
     claude_session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
@@ -1048,7 +1143,7 @@ def cmd_connect(args: argparse.Namespace) -> int:
     if not result.ok:
         if result.error == "revoked":
             print("This machine's audiochatty token was revoked.")
-            print("Run /audiochatty-login to pair again.")
+            print("Run /audiochatty-pair-start, then /audiochatty-pair-finish, to pair again.")
             return 1
         if result.error == "bind_failed":
             print(result.detail)
@@ -1077,7 +1172,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     claude_session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
 
     if not credentials.get("token"):
-        print("This machine isn't paired with audiochatty. Run /audiochatty-login to pair it.")
+        print("This machine isn't paired with audiochatty. Run /audiochatty-pair-start to")
+        print("get a code, then /audiochatty-pair-finish once you've entered it.")
         return 0
 
     workspace = credentials.get("workspace_name") or "audiochatty"
@@ -1094,10 +1190,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         # Distinguished from "never connected" because the fix is different and because a
         # user who ran /audiochatty-disconnect should be told it held rather than left
         # wondering whether it worked.
-        print("This session was disconnected — nothing from it is being sent, and it stays")
+        print("This session was disconnected. Nothing from it is being sent, and it stays")
         print("that way for the rest of the session. Run /audiochatty-connect to undo that.")
     else:
-        print("This session is NOT registered — nothing from it is being sent.")
+        print("This session is NOT registered. Nothing from it is being sent.")
         print("Run /audiochatty-connect [name] to start.")
 
     _print_wrapper_status(claude_session_id, registered=bool(marker))
@@ -1187,8 +1283,8 @@ def _connect_error_line(error: str) -> str:
     if error == "revoked":
         return (
             "This session tried to connect at launch and audiochatty rejected the "
-            "machine's token.\nRun /audiochatty-login to pair again, then "
-            "/audiochatty-connect."
+            "machine's token.\nPair it again with /audiochatty-pair-start and "
+            "/audiochatty-pair-finish, then run\n/audiochatty-connect."
         )
     if error == "unreachable":
         return (
@@ -1415,11 +1511,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    login = sub.add_parser("login", help="Pair this machine with audiochatty.")
-    login.add_argument("--label", default=None, help="What to call this machine.")
-    login.add_argument("--wait", type=float, default=DEFAULT_LOGIN_WAIT)
-    login.add_argument("--reset", action="store_true", help="Discard a pending code.")
-    login.set_defaults(func=cmd_login)
+    pair_start = sub.add_parser(
+        "pair-start", help="Get a pairing code for this machine."
+    )
+    pair_start.add_argument("--label", default=None, help="What to call this machine.")
+    pair_start.add_argument("--reset", action="store_true", help="Discard a pending code.")
+    pair_start.set_defaults(func=cmd_pair_start)
+
+    pair_finish = sub.add_parser(
+        "pair-finish", help="Finish pairing once the code has been entered."
+    )
+    pair_finish.add_argument("--wait", type=float, default=DEFAULT_PAIR_WAIT)
+    pair_finish.set_defaults(func=cmd_pair_finish)
 
     connect = sub.add_parser("connect", help="Register this session.")
     connect.add_argument("name", nargs="?", default=None)

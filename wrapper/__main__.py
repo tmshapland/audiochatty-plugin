@@ -141,7 +141,7 @@ hook (`--resume`, where the session id isn't ours to mint).
 held while connecting was a separate act, Phase 2 measured it, and W13 spends it knowingly:
 on a paired machine every wrapped launch now registers and starts polling. The property
 survives in exactly one case, and it is worth keeping — an *unpaired* machine still does
-nothing and calls nothing, so `audiochatty run` before `/audiochatty-login` is indis-
+nothing and calls nothing, so `audiochatty run` before the machine is paired is indis-
 tinguishable from plain `claude`.
 
 Steps 1-3 are in that order because step 2 forks, and `subprocess`'s `preexec_fn` runs

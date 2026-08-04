@@ -1,4 +1,4 @@
-"""The four slash commands, driven the way Claude Code drives them.
+"""The five slash commands, driven the way Claude Code drives them.
 
 Every test runs `scripts/audiochat.py` as a subprocess against the stub backend, with
 `AUDIOCHATTY_HOME` pointed at a temp directory — so the suite is safe to run on a machine
@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -201,37 +202,43 @@ class CliTestCase(unittest.TestCase):
 
     def pair(self) -> None:
         """Get to a paired machine the way a user would: mint, then redeem."""
-        self.run_cli("login")
-        self.run_cli("login", "--wait", "0")
+        self.run_cli("pair-start")
+        self.run_cli("pair-finish", "--wait", "0")
 
 
-# -- login ------------------------------------------------------------------------------
+# -- pairing ----------------------------------------------------------------------------
 
 
-class TestLogin(CliTestCase):
-    def test_first_run_prints_the_code_and_stores_no_credentials(self):
-        result = self.run_cli("login")
+class TestPairing(CliTestCase):
+    def test_pair_start_prints_the_code_and_stores_no_credentials(self):
+        result = self.run_cli("pair-start")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("WXYZ-1234", result.stdout)
         self.assertIn("http://localhost:3000/link", result.stdout)
-        # The point of the two-step flow: the first run returns immediately, so the user
-        # can actually see the code.
+        # The point of the two-step flow: the first command returns immediately, so the
+        # user can actually see the code.
         self.assertEqual(self.credentials(), {})
         self.assertTrue((self.home / "pending.json").exists())
+
+    def test_pair_start_names_pair_finish_as_the_next_step(self):
+        """The whole reason these are two commands rather than one run twice: the user is
+        told what to run next by name, not told to run this again."""
+        result = self.run_cli("pair-start")
+        self.assertIn("/audiochatty:audiochatty-pair-finish", result.stdout)
 
     def test_the_device_code_is_never_printed(self):
         """The `user_code` is meant to be read off the screen. The `device_code` is the
         secret half and must never reach the transcript."""
-        result = self.run_cli("login")
+        result = self.run_cli("pair-start")
         self.assertNotIn("stub-device-code", result.stdout)
         self.assertNotIn("stub-device-code", result.stderr)
         pending = json.loads((self.home / "pending.json").read_text())
         self.assertEqual(pending["device_code"], "stub-device-code")
 
-    def test_second_run_redeems_and_stores_the_token(self):
-        self.run_cli("login")
-        result = self.run_cli("login", "--wait", "0")
+    def test_pair_finish_redeems_and_stores_the_token(self):
+        self.run_cli("pair-start")
+        result = self.run_cli("pair-finish", "--wait", "0")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Linked to Mike's Workspace as Mike.", result.stdout)
@@ -241,8 +248,8 @@ class TestLogin(CliTestCase):
         self.assertFalse((self.home / "pending.json").exists())
 
     def test_the_token_is_never_printed(self):
-        self.run_cli("login")
-        result = self.run_cli("login", "--wait", "0")
+        self.run_cli("pair-start")
+        result = self.run_cli("pair-finish", "--wait", "0")
         self.assertNotIn("stub-device-token", result.stdout)
         self.assertNotIn("stub-device-token", result.stderr)
 
@@ -253,42 +260,43 @@ class TestLogin(CliTestCase):
         self.assertEqual(stat.S_IMODE(self.home.stat().st_mode), 0o700)
 
     def test_pending_approval_keeps_the_code_alive(self):
-        self.run_cli("login")
+        self.run_cli("pair-start")
         self.backend.reply("/device/token", 400, {"error": "authorization_pending"})
 
-        result = self.run_cli("login", "--wait", "0")
+        result = self.run_cli("pair-finish", "--wait", "0")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Still waiting", result.stdout)
         self.assertIn("WXYZ-1234", result.stdout)
+        self.assertIn("/audiochatty:audiochatty-pair-finish", result.stdout)
         # Nothing was consumed — running the command again resumes the same pairing.
         self.assertTrue((self.home / "pending.json").exists())
         self.assertEqual(self.credentials(), {})
 
     def test_slow_down_is_honoured_then_the_poll_succeeds(self):
-        self.run_cli("login")
+        self.run_cli("pair-start")
         self.backend.reply("/device/token", 400, {"error": "slow_down", "interval": 1})
 
-        result = self.run_cli("login", "--wait", "30")
+        result = self.run_cli("pair-finish", "--wait", "30")
 
         self.assertIn("Linked to", result.stdout)
         self.assertEqual(len(self.backend.requests_to("/device/token")), 2)
 
     def test_an_expired_code_is_discarded_with_a_plain_message(self):
-        self.run_cli("login")
+        self.run_cli("pair-start")
         self.backend.reply("/device/token", 400, {"error": "expired_token"})
 
-        result = self.run_cli("login", "--wait", "0")
+        result = self.run_cli("pair-finish", "--wait", "0")
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("expired", result.stdout.lower())
         self.assertFalse((self.home / "pending.json").exists())
 
     def test_an_already_redeemed_code_is_discarded(self):
-        self.run_cli("login")
+        self.run_cli("pair-start")
         self.backend.reply("/device/token", 400, {"error": "invalid_grant"})
 
-        result = self.run_cli("login", "--wait", "0")
+        result = self.run_cli("pair-finish", "--wait", "0")
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("no longer valid", result.stdout)
@@ -296,18 +304,18 @@ class TestLogin(CliTestCase):
 
     def test_a_rate_limited_mint_says_so(self):
         self.backend.reply("/device/code", 429, {"error": "Too many pairing attempts."})
-        result = self.run_cli("login")
+        result = self.run_cli("pair-start")
         self.assertEqual(result.returncode, 1)
         self.assertIn("Too many pairing attempts", result.stdout)
 
     def test_an_unreachable_backend_does_not_traceback(self):
-        result = self.run_cli("login", backend="http://127.0.0.1:1")
+        result = self.run_cli("pair-start", backend="http://127.0.0.1:1")
         self.assertEqual(result.returncode, 1)
         self.assertIn("Could not reach audiochatty", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_the_hostname_rides_along_as_the_label(self):
-        self.run_cli("login")
+        self.run_cli("pair-start")
         body = self.backend.last_request("/device/code")["body"]
         self.assertTrue(body["label"], "the approving browser needs something to show")
 
@@ -315,8 +323,8 @@ class TestLogin(CliTestCase):
         """R12, and Phase 0's launch decision: the bare command, not an alias. Four surfaces
         describe this setup and this is the only one we fully control and the only one the
         user is looking at when the step is due."""
-        self.run_cli("login")
-        result = self.run_cli("login", "--wait", "0")
+        self.run_cli("pair-start")
+        result = self.run_cli("pair-finish", "--wait", "0")
 
         self.assertIn(RUN_COMMAND, result.stdout)
         # The launch flag is gone, and nothing here may reintroduce it.
@@ -326,8 +334,8 @@ class TestLogin(CliTestCase):
         """W13. This copy told users to run `/audiochatty-connect` after `audiochatty run`
         for as long as connecting was a separate act. It isn't one — so naming it here would
         send every new user off to do something that now does nothing."""
-        self.run_cli("login")
-        result = self.run_cli("login", "--wait", "0")
+        self.run_cli("pair-start")
+        result = self.run_cli("pair-finish", "--wait", "0")
 
         self.assertNotIn("/audiochatty-connect", result.stdout)
         self.assertIn("connects the session for you", result.stdout)
@@ -337,18 +345,72 @@ class TestLogin(CliTestCase):
         it has to *be* one first, and that is a real install step rather than an alternative
         way to invoke it. The path is resolved from the plugin, so it is right wherever the
         plugin was installed."""
-        self.run_cli("login")
-        result = self.run_cli("login", "--wait", "0")
+        self.run_cli("pair-start")
+        result = self.run_cli("pair-finish", "--wait", "0")
 
         self.assertIn("alias audiochatty=", result.stdout)
         self.assertIn(str(SCRIPTS.parent / "wrapper" / "audiochatty"), result.stdout)
 
     def test_reset_discards_a_pending_code(self):
-        self.run_cli("login")
+        self.run_cli("pair-start")
         first = json.loads((self.home / "pending.json").read_text())["user_code"]
-        self.run_cli("login", "--reset")
+        self.run_cli("pair-start", "--reset")
         self.assertEqual(len(self.backend.requests_to("/device/code")), 2)
         self.assertEqual(first, "WXYZ-1234")
+
+
+class TestPairingInTheWrongState(CliTestCase):
+    """Two commands means each can be run when the other one was due. Neither may guess:
+    running the wrong half has to say which half was wrong (👤 2026-08-04)."""
+
+    def test_pair_start_reshows_a_live_code_instead_of_minting_another(self):
+        """A second live code would leave the first one unexpired and typable into `/link`,
+        and the user asking again wants *the* code, not another one."""
+        self.run_cli("pair-start")
+
+        result = self.run_cli("pair-start")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WXYZ-1234", result.stdout)
+        self.assertIn("already have a pairing code", result.stdout)
+        self.assertIn("/audiochatty:audiochatty-pair-finish", result.stdout)
+        self.assertEqual(len(self.backend.requests_to("/device/code")), 1)
+
+    def test_pair_finish_before_pair_start_says_which_to_run(self):
+        result = self.run_cli("pair-finish", "--wait", "0")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("nothing to finish", result.stdout)
+        self.assertIn("/audiochatty:audiochatty-pair-start", result.stdout)
+        self.assertEqual(self.backend.requests_to("/device/token"), [])
+
+    def test_pair_finish_on_an_already_paired_machine_is_not_an_error(self):
+        """Running it twice is the most likely misfire of all, and the machine is in the
+        state the user wanted. Saying so beats telling them off."""
+        self.pair()
+
+        result = self.run_cli("pair-finish", "--wait", "0")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already paired to Mike's Workspace as Mike", result.stdout)
+        self.assertIn("/audiochatty:audiochatty-pair-start", result.stdout)
+        # One redemption, from `pair()`. This run spent nothing.
+        self.assertEqual(len(self.backend.requests_to("/device/token")), 1)
+        self.assertEqual(self.credentials()["token"], "stub-device-token")
+
+    def test_pair_finish_on_an_expired_code_says_so_and_clears_it(self):
+        self.run_cli("pair-start")
+        pending = json.loads((self.home / "pending.json").read_text())
+        pending["expires_at"] = time.time() - 1
+        (self.home / "pending.json").write_text(json.dumps(pending))
+
+        result = self.run_cli("pair-finish", "--wait", "0")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no longer good", result.stdout)
+        self.assertIn("/audiochatty:audiochatty-pair-start", result.stdout)
+        self.assertFalse((self.home / "pending.json").exists())
+        self.assertEqual(self.backend.requests_to("/device/token"), [])
 
 
 # -- connect ----------------------------------------------------------------------------
@@ -410,10 +472,10 @@ class TestConnect(CliTestCase):
             "sess-1",
         )
 
-    def test_an_unpaired_machine_is_told_to_log_in(self):
+    def test_an_unpaired_machine_is_told_to_pair(self):
         result = self.run_cli("connect", "x", "--session-id", "sess-1")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("/audiochatty-login", result.stdout)
+        self.assertIn("/audiochatty-pair-start", result.stdout)
         self.assertEqual(self.backend.requests_to("/agent/session"), [])
 
     def test_a_revoked_token_says_so_and_writes_no_marker(self):
@@ -1017,7 +1079,7 @@ class TestStatusExplainsASilentLaunchFailure(CliTestCase):
         result = self.run_cli("status", "--session-id", "sess-1")
 
         self.assertIn("rejected the machine's token", result.stdout)
-        self.assertIn("/audiochatty-login", result.stdout)
+        self.assertIn("/audiochatty-pair-start", result.stdout)
 
     def test_an_unrecognised_code_still_produces_something_honest(self):
         self.pair()
