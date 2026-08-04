@@ -703,8 +703,8 @@ def _login_start(base: str, label: str | None) -> int:
     print(f"      {user_code}")
     print()
     print(f"It expires in {int(expires_in // 60)} minutes.")
-    print("Once you've entered it, run /audiochatty-login again to finish.")
-    print("After you enter the code, run /audiochatty:audiochatty-login again here in Claude Code.")
+    print()
+    print("After you enter the code, run /audiochatty:audiochatty-login again here in Claude Code to finish.")
     return 0
 
 
@@ -763,8 +763,8 @@ def _login_collect(pending: dict, base: str, wait: float) -> int:
 def _login_still_waiting(pending: dict, expires_at: float) -> int:
     remaining = max(int(expires_at - time.time()), 0)
     print(f"Still waiting for {pending.get('user_code')} to be approved.")
-    print(f"Open {pending.get('verification_uri')} and enter it — {remaining // 60}m left.")
-    print("Then run /audiochatty-login again.")
+    print(f"Open {pending.get('verification_uri')} and enter it. {remaining // 60}m left.")
+    print("Then run /audiochatty:audiochatty-login again here in Claude Code.")
     return 0
 
 
