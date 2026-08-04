@@ -800,20 +800,16 @@ def _login_finish(response: dict, base: str) -> int:
     # descriptions, the README, and here — and this is the only one whose words we fully
     # control and the only one the user is looking at when the step is actually due. So it
     # carries the command and the reason, not a pointer to somewhere else that carries them.
-    print("Next, let's create a shortcut command for starting an audiochatty session. If")
-    print("`audiochatty` isn't a command on this machine yet, that is one line in your shell")
-    print("profile:")
+    print("Next, let's create a shortcut command for starting an audiochatty session.")
     print()
     print(f'    alias audiochatty="{WRAPPER_LAUNCHER}"')
     print()
-    print("That part's one-time. After you add it, start every new session with:")
     print()
+    print("After you add the shortcut to your shell profile (~/.zshrc or ~/.bashrc), open a new terminal so it takes effec t.")
+    print()
+    print("To connect Audiochatty to a Claude Code session, start Claude Code with the shortcut:")
     print(f"    {RUN_COMMAND} --name [name]")
     print()
-    print("That's the whole of it — it connects the session for you, so there's nothing to")
-    print("run afterwards. It's the same Claude Code you already use: same terminal, nothing")
-    print("to load, no warning, with a return path attached. A session started with plain")
-    print("`claude` has no return path, so there is nothing there to tell it what to do.")
     return 0
 
 

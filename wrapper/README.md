@@ -33,7 +33,8 @@ session is connected:
 
 The old version of this — a Claude Code plugin — could only *push a notification* into a
 session. This can type. That is a real increase in what a bug or a compromised backend could
-do, and it is why the disclosure text in the app says so too.
+do. (The app used to carry a disclosure paragraph saying so on `/link`; 👤 removed it on
+2026-08-03, so this README is now the only place it's written down.)
 
 ---
 
