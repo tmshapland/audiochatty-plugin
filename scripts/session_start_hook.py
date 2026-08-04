@@ -94,6 +94,14 @@ def main() -> int:
         _debug("machine not paired; nothing to connect with")
         return 0
 
+    # The Stop hook's circuit breaker, reused for the same reason it exists: this runs
+    # before the user has their prompt, so paying a timeout on every session start while
+    # the backend is asleep is felt directly. One session start pays it; the next few
+    # minutes' worth pay nothing.
+    if audiochat.breaker_is_open():
+        _debug("backend recently unreachable; not connecting this session")
+        return 0
+
     repo_path = str(hook.get("cwd") or "") or os.getcwd()
     name = audiochat.default_session_name(repo_path)
     base = audiochat.backend_url()
@@ -117,7 +125,16 @@ def main() -> int:
         # Same reasoning as the wrapper's own connect: there is no `/audiochatty-connect`
         # turn to swallow, so the next turn this session finishes is real work.
         skip_next_turn=False,
+        # **Not the CLI's ten seconds.** `hooks/hooks.json` kills this hook at ten, and it
+        # runs before the user gets their prompt — so a sleeping backend on the CLI timeout
+        # would turn every resumed launch into a ten-second wait ending in a killed hook.
+        # Four is what the Stop hook uses, for the same reason.
+        timeout=audiochat.HOOK_TIMEOUT,
     )
+    if result.error == "unreachable":
+        # Trips the shared breaker, so the next session start (and the next completed turn)
+        # skips the network entirely rather than paying this again.
+        audiochat.trip_breaker()
     _debug(
         f'source={source!r} connect -> {"ok" if result.ok else result.error}'
         + (f' as "{result.name}"' if result.ok else "")

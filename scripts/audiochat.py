@@ -800,20 +800,20 @@ def _login_finish(response: dict, base: str) -> int:
     # descriptions, the README, and here — and this is the only one whose words we fully
     # control and the only one the user is looking at when the step is actually due. So it
     # carries the command and the reason, not a pointer to somewhere else that carries them.
-    print("One more step, and it's per session rather than per machine: a session can only")
-    print("be talked to if you start Claude Code through audiochatty. Start it with:")
+    print("Next, let's create a shortcut command for starting an audiochatty session. If")
+    print("`audiochatty` isn't a command on this machine yet, that is one line in your shell")
+    print("profile:")
     print()
-    print(f"    {RUN_COMMAND}")
+    print(f'    alias audiochatty="{WRAPPER_LAUNCHER}"')
+    print()
+    print("That part's one-time. After you add it, start every new session with:")
+    print()
+    print(f"    {RUN_COMMAND} --name [name]")
     print()
     print("That's the whole of it — it connects the session for you, so there's nothing to")
     print("run afterwards. It's the same Claude Code you already use: same terminal, nothing")
     print("to load, no warning, with a return path attached. A session started with plain")
     print("`claude` has no return path, so there is nothing there to tell it what to do.")
-    print()
-    print("If `audiochatty` isn't a command on this machine yet, that is one line in your")
-    print("shell profile:")
-    print()
-    print(f'    alias audiochatty="{WRAPPER_LAUNCHER}"')
     return 0
 
 
@@ -878,6 +878,7 @@ def connect_session(
     wrapper_pid=None,
     wrapper_port=None,
     skip_next_turn: bool,
+    timeout: float = CLI_TIMEOUT,
 ) -> ConnectResult:
     """Register this session, bind its return path, say it's reachable, open the gate.
 
@@ -897,6 +898,14 @@ def connect_session(
     X in audiochatty", which is not worth reading back to the person who just typed it. A
     launch has no such turn, so on the automatic paths the session's first turn is real work
     and must not be swallowed.
+
+    **`timeout` is the caller's patience, and it differs by more than taste.** The slash
+    command and the wrapper's own launch connect can afford `CLI_TIMEOUT`: a person is
+    watching the first, and the second runs on a thread nobody is waiting for. The
+    `SessionStart` hook cannot — it runs *before* the user gets their prompt, and
+    `hooks/hooks.json` kills it at ten seconds, so a sleeping backend on that path is felt
+    as a session that takes ten seconds to start. It passes `HOOK_TIMEOUT` for the same
+    reason `post_turn` does.
     """
     try:
         response = post(
@@ -904,6 +913,7 @@ def connect_session(
             {"claude_session_id": claude_session_id, "name": name, "repo_path": repo_path},
             token=token,
             base_url=base_url,
+            timeout=timeout,
         )
     except ApiError as exc:
         if exc.status == 401:
@@ -930,7 +940,7 @@ def connect_session(
         # Best effort, and the failure of the undo is survivable: what it leaves is a
         # session with no marker, which sends nothing and reads as unreachable in the inbox
         # — a degraded state the frontend already has somewhere to show.
-        _end_session_quietly(claude_session_id, token, base_url)
+        _end_session_quietly(claude_session_id, token, base_url, timeout=timeout)
         return ConnectResult(
             False,
             error="bind_failed",
@@ -942,7 +952,7 @@ def connect_session(
     # retry loop here. Failure is not fatal and deliberately not reported — the wrapper
     # retries this from its own poll loop, so the cost of losing the call is that the phone
     # shows this session as unreachable for a few seconds.
-    _mark_verified_quietly(claude_session_id, token, base_url)
+    _mark_verified_quietly(claude_session_id, token, base_url, timeout=timeout)
 
     marker = {
         "claude_session_id": claude_session_id,
@@ -1041,7 +1051,7 @@ def cmd_connect(args: argparse.Namespace) -> int:
 
     if not result.ok:
         if result.error == "revoked":
-            print("This machine's audiochatty token was revoked. ")
+            print("This machine's audiochatty token was revoked.")
             print("Run /audiochatty-login to pair again.")
             return 1
         if result.error == "bind_failed":
@@ -1277,7 +1287,8 @@ def cmd_disconnect(args: argparse.Namespace) -> int:
     return 0
 
 
-def _end_session_quietly(claude_session_id: str, token: str, base: str | None) -> None:
+def _end_session_quietly(claude_session_id: str, token: str, base: str | None,
+                         timeout: float = CLI_TIMEOUT) -> None:
     """`POST /agent/session/end`, swallowing everything.
 
     Two callers with the same need: `disconnect`, where local state is already correct and
@@ -1290,12 +1301,14 @@ def _end_session_quietly(claude_session_id: str, token: str, base: str | None) -
             {"claude_session_id": claude_session_id},
             token=token,
             base_url=backend_url(base),
+            timeout=timeout,
         )
     except (ApiError, TransportError):
         pass
 
 
-def _mark_verified_quietly(claude_session_id: str, token: str, base: str | None) -> bool:
+def _mark_verified_quietly(claude_session_id: str, token: str, base: str | None,
+                           timeout: float = CLI_TIMEOUT) -> bool:
     """`POST /agent/session/verified` — the whole of W8, in one call that may fail.
 
     The inbox reads `agent_sessions.channel_verified_at` to decide whether the user is
@@ -1316,6 +1329,7 @@ def _mark_verified_quietly(claude_session_id: str, token: str, base: str | None)
             {"claude_session_id": claude_session_id},
             token=token,
             base_url=backend_url(base),
+            timeout=timeout,
         )
     except (ApiError, TransportError):
         return False

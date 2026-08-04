@@ -64,7 +64,7 @@ def pick(port: int | None) -> dict:
                 return record
         sys.exit(f"no wrapper listening on {port}")
     if not running:
-        sys.exit("no wrapper running — start one with `wrapper/audiochatty run`")
+        sys.exit("no wrapper running. Start one with `wrapper/audiochatty run`")
     if len(running) > 1:
         ports = ", ".join(str(r.get("port")) for r in running)
         sys.exit(f"{len(running)} wrappers running (ports {ports}) — pass --port")

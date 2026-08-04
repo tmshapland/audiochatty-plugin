@@ -741,13 +741,34 @@ class TestSessionStartConnects(HookTestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("[audiochatty]", result.stderr)
 
-    def test_an_unreachable_backend_is_survivable_and_silent(self):
+    def test_an_unreachable_backend_is_survivable_silent_and_quick(self):
+        """**And quick is the load-bearing word.** This hook runs before the user gets their
+        prompt and `hooks/hooks.json` kills it at ten seconds, so the CLI's ten-second
+        timeout here would turn every resumed launch against a sleeping backend into a
+        ten-second wait ending in a killed hook. It uses `HOOK_TIMEOUT` instead — the same
+        four seconds, for the same reason, as the Stop hook."""
+        started = time.monotonic()
+
         result = self.run_start(backend=UNROUTABLE)
 
+        elapsed = time.monotonic() - started
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertNotIn("Traceback", result.stderr)
         self.assertEqual(self.marker(), {})
+        self.assertLess(elapsed, 6.0, "a session start must not wait on a dead backend")
+
+    def test_a_second_session_start_does_not_pay_the_timeout_again(self):
+        """The breaker, shared with the Stop hook. One session start pays for an outage; the
+        next few minutes' worth cost nothing."""
+        self.run_start(backend=UNROUTABLE)
+
+        started = time.monotonic()
+        result = self.run_start(backend=UNROUTABLE)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result.returncode, 0)
+        self.assertLess(elapsed, 2.0, "the breaker did not hold the network back")
 
     def test_garbage_on_stdin_is_survivable(self):
         for raw in ("", "not json", "[]"):

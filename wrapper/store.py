@@ -165,6 +165,15 @@ class WrapperState:
     def _write(self, **patch) -> None:
         with self._lock:
             self._record.update(patch)
+            if self._cleaned:
+                # W13 made this reachable. The connect runs on a background thread, so a
+                # wrapper that exits while it is still in flight can have a write land
+                # *after* `cleanup()` unlinked the file — recreating a rendezvous file for a
+                # process that no longer exists, which is the one thing `cleanup` exists to
+                # prevent. Readers skip dead pids and the next launch prunes it, so the cost
+                # was small; the guard is smaller.
+                debug("dropping a rendezvous write after cleanup")
+                return
             try:
                 write_private_json(self.path, self._record)
             except OSError as err:

@@ -27,8 +27,8 @@ session is connected:
 | **What that means for prompts** | It types into a live terminal, so text it sends can land on a permission prompt or any other keypress-driven UI. Answering those by voice is a deliberate, separate, still-unbuilt feature (`wrapper_return_path_plan.md` Phase 9) — but the *capability* is inherent to typing into a terminal and exists the moment you use this. |
 | **Who can make it type** | A local process that (a) can reach a loopback port on this machine and (b) can read your `~/.audiochatty/credentials.json`. On a single-user laptop that is you and anything you run. There is no remote path in: the wrapper never accepts an inbound connection from off the machine. |
 | **What reaches it from outside** | Only messages your own audiochatty workspace addressed to *this* session, fetched by the wrapper asking the backend — never pushed. |
-| **When it's off** | Until `/audiochatty-connect` runs in the session, the wrapper is inert: it proxies your terminal and does nothing else. No polling, no network, and `/inject` refuses. |
-| **On disk** | `~/.audiochatty/wrappers/<pid>.json`, mode 0600, deleted when the wrapper exits — plus, once a session has been delivered to, `<claude-session-id>.delivered.json` beside it, which is the list of instruction ids already typed in and outlives the process on purpose. Your device token is in neither. |
+| **When it's off** | On a machine you have not paired with `/audiochatty-login`, the wrapper is inert: it proxies your terminal and does nothing else. No polling, no network, and `/inject` refuses. On a paired machine it connects itself at launch, so it is *on* from the moment you run it — `/audiochatty-disconnect` is how you turn one session off again. |
+| **On disk** | `~/.audiochatty/wrappers/<pid>.json`, mode 0600, deleted when the wrapper exits — plus, once a session has been delivered to, `<claude-session-id>.delivered.json` beside it, which is the list of instruction ids already typed in and outlives the process on purpose. Your device token is in neither; the rendezvous file does carry the reason a launch connect failed, so `/audiochatty-status` can explain a session that never appeared. |
 | **Platform** | macOS and Linux. The pseudo-terminal this is built on does not exist on Windows. |
 
 The old version of this — a Claude Code plugin — could only *push a notification* into a
@@ -55,13 +55,14 @@ or alias it:
 alias audiochatty="/path/to/audiochat-plugin/wrapper/audiochatty"
 ```
 
-Then, in the session it starts:
+That is the whole of it. On a paired machine the wrapper registers the session it starts and
+binds itself, so both halves are live from launch with nothing typed into the session
+(`wrapper_return_path_plan.md` W13). `--name laptop` chooses how it appears in your inbox;
+the default is the current folder's name.
 
-```
-> /audiochatty-connect laptop
-```
-
-That is what connects the two halves. Without it the wrapper types nothing.
+It says nothing about any of that, deliberately — stdout belongs to Claude Code's interface,
+and a line written there is a corrupted screen. `/audiochatty-status`, inside the session, is
+where you find out whether it worked and why not.
 
 **Requires Python 3 and nothing else.** No pip, no venv, no build step — the same promise as
 the rest of `scripts/`, which the previous Bun-based version had broken.
@@ -72,6 +73,7 @@ the rest of `scripts/`, which the previous Bun-based version had broken.
 | --- | --- |
 | `--quiet-period SECONDS` | How long you have to have stopped typing before an instruction is typed in. Default 1.5. |
 | `--claude-bin PATH` | The program to wrap. Exists for the test suite. |
+| `--name NAME` | What to call this session in audiochatty. Defaults to the current folder's name. |
 | `--verbose` | Print the port and rendezvous path to stderr at startup. Off by default, because a wrapped session should look exactly like an unwrapped one. |
 | `AUDIOCHATTY_DEBUG=1` | Narrate what the wrapper is doing, on stderr. |
 | `AUDIOCHATTY_HOME` | Move `~/.audiochatty` elsewhere. Used by the tests. |
@@ -86,9 +88,11 @@ the rest of `scripts/`, which the previous Bun-based version had broken.
 3. It sits between your keyboard and that terminal, passing bytes both ways. Raw mode, window
    resizes, Ctrl-C, and the child's exit code all pass through, which is why a wrapped session
    feels like an unwrapped one.
-4. Once connected, it asks the backend for anything you have spoken, and types it in.
+4. It connects that session — registers it, binds itself, tells the backend it is reachable —
+   on a background thread, so a slow backend never delays the terminal.
+5. From then on it asks the backend for anything you have spoken, and types it in.
 
-Step 4 is a poll, not a push: `GET /agent/inbound` every 5 seconds while something could
+Step 5 is a poll, not a push: `GET /agent/inbound` every 5 seconds while something could
 plausibly be in flight, every 30 once it has been quiet, and not at all for a minute after a
 failed request. A laptop behind NAT cannot be pushed to, and a backend asleep on a free tier
 must not turn into a hot loop.
