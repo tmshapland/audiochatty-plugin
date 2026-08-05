@@ -176,6 +176,7 @@ class WrappedSession:
         self._screen = bytearray()
         self._reading = True
         self._closed = False
+        self._stderr_text: str | None = None
         self._reader = threading.Thread(target=self._drain_screen, daemon=True)
         self._reader.start()
 
@@ -293,6 +294,8 @@ class WrappedSession:
             self._screen.extend(data)
 
     def stderr(self) -> str:
+        if self._stderr_text is not None:
+            return self._stderr_text
         if self.proc.stderr and self.proc.poll() is not None:
             return self.proc.stderr.read().decode(errors="replace")
         return ""
@@ -326,7 +329,14 @@ class WrappedSession:
                 os.close(self.stdin_master)
             except OSError:
                 pass
-        if self.proc.stderr:
+        # Cached because the pipe is closed right below, and `stop()` is called twice on any
+        # session a test stops itself — once there, once again from `tearDown` — so a second
+        # `.read()` on an already-closed file must not happen.
+        if self.proc.stderr and self._stderr_text is None:
+            try:
+                self._stderr_text = self.proc.stderr.read().decode(errors="replace")
+            except ValueError:
+                self._stderr_text = ""
             self.proc.stderr.close()
         return self.proc.returncode
 
@@ -1049,6 +1059,49 @@ class TestConnectOnLaunch(WrapperTestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue(wait_for(lambda: session.reread().get("bound"), timeout=10))
             self.assertEqual(session.record["claude_session_id"], session.session_id)
+
+
+class TestVerbose(WrapperTestCase):
+    """`--verbose` used to be just the one startup line; it is now a superset of
+    `AUDIOCHATTY_DEBUG=1` — same shared `store.debug()`, reached without setting the env var
+    (which would otherwise leak into the wrapped `claude`'s own environment)."""
+
+    def test_verbose_narrates_via_the_shared_debug_path(self):
+        session = self.start(extra_args=["--verbose"])
+        self.assertTrue(wait_for(lambda: b"argv=" in session.child_saw()))
+        session.stop()
+
+        err = session.stderr()
+        self.assertIn("audiochatty: port", err)  # the original, dedicated startup line
+        self.assertIn("[audiochatty wrapper] spawned", err)  # pty_proxy's debug() line
+
+    def test_verbose_narrates_the_injector(self):
+        """`inject.py` had no diagnostic output under either mechanism before this — prove
+        `--verbose` now reaches its enqueue/type/submit transitions too."""
+        session = self.start(extra_args=["--verbose"])
+        session.bind()
+        session.call("/inject", {"token": TOKEN, "text": "narrate me"})
+        wait_for(lambda: session.child_saw().endswith(b"\x1b[201~\r") and session.child_saw())
+        session.stop()
+
+        err = session.stderr()
+        self.assertIn("enqueued instruction", err)
+        self.assertIn("typed paste", err)
+        self.assertIn("submitted paste", err)
+
+    def test_without_verbose_the_injector_stays_silent(self):
+        """The counterpart to the above: same instruction, no flag, nothing on stderr. Checked
+        after `stop()` (unlike the screen-silence test) so it reflects what was actually
+        written, not `stderr()`'s "" default while the process is still running."""
+        session = self.start()
+        session.bind()
+        session.call("/inject", {"token": TOKEN, "text": "stay quiet"})
+        wait_for(lambda: session.child_saw().endswith(b"\x1b[201~\r") and session.child_saw())
+        session.stop()
+
+        err = session.stderr()
+        self.assertNotIn("audiochatty:", err)
+        self.assertNotIn("[audiochatty wrapper]", err)
 
 
 class TestTerminalBehaviour(WrapperTestCase):

@@ -1,6 +1,18 @@
 {
-  "description": "audiochatty ingest and connect. SessionStart connects a resumed session to the `audiochatty run` wrapper that started it (W13; ordinary launches connect themselves). Stop posts a completed turn for connected sessions; SessionEnd retires a registration, but only when the session has really ended. All three exit silently, print nothing on stdout, and never block the terminal.",
+  "description": "audiochatty ingest, connect, and voice approval. SessionStart connects a resumed session to the `audiochatty run` wrapper that started it (W13; ordinary launches connect themselves). Stop posts a completed turn for connected sessions; SessionEnd retires a registration, but only when the session has really ended. Those three exit silently, print nothing on stdout, and never block the terminal. PermissionRequest is the exception and is meant to be: in a connected session it holds the terminal while the decision is made by voice, and every failure falls through to Claude Code's own dialog. Its timeout is set above the hook's own hold so the hold, not the harness, is what ends the wait — and if a harness caps it lower, a killed hook prints nothing, which is the same fall-through.",
   "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/permission_hook.py"],
+            "timeout": 660
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

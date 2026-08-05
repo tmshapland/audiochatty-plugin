@@ -210,8 +210,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--verbose",
         action="store_true",
-        help="Print the port and rendezvous path before starting. Off by default: a "
-        "wrapped session should look exactly like an unwrapped one.",
+        help="Print the port and rendezvous path before starting, and narrate the wrapper's "
+        "internal state for the rest of the run (equivalent to AUDIOCHATTY_DEBUG=1). Off by "
+        "default: a wrapped session should look exactly like an unwrapped one.",
     )
     run.add_argument(
         "claude_args",
@@ -223,6 +224,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def cmd_run(args: argparse.Namespace) -> int:
     claude_args = [a for a in args.claude_args if a != "--"]
+
+    # Before anything else can call `store.debug()` — `prune_stale()` below is the first.
+    store.set_verbose(args.verbose)
 
     # W13's hook-free half: we choose the session id, so we know it before the session
     # exists. See the `expected_session_id` note in the module docstring for what it buys.

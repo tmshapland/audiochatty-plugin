@@ -75,8 +75,8 @@ the rest of `scripts/`, which the previous Bun-based version had broken.
 | `--quiet-period SECONDS` | How long you have to have stopped typing before an instruction is typed in. Default 1.5. |
 | `--claude-bin PATH` | The program to wrap. Exists for the test suite. |
 | `--name NAME` | What to call this session in audiochatty. Defaults to the current folder's name. |
-| `--verbose` | Print the port and rendezvous path to stderr at startup. Off by default, because a wrapped session should look exactly like an unwrapped one. |
-| `AUDIOCHATTY_DEBUG=1` | Narrate what the wrapper is doing, on stderr. |
+| `--verbose` | Print the port and rendezvous path to stderr at startup, then narrate what the wrapper is doing for the rest of the run — same output as `AUDIOCHATTY_DEBUG=1` below, folded into one flag. Off by default, because a wrapped session should look exactly like an unwrapped one. |
+| `AUDIOCHATTY_DEBUG=1` | The env-var form of the narration half of `--verbose` (no startup line). Kept for cases a CLI flag can't reach — a test harness, a subprocess not launched via `audiochatty run` directly. |
 | `AUDIOCHATTY_HOME` | Move `~/.audiochatty` elsewhere. Used by the tests. |
 | `AUDIOCHATTY_POLL_*` | `ACTIVE`, `IDLE`, `COOLDOWN`, `TIMEOUT` — the poll cadences in seconds. Undocumented as options for the same reason `--claude-bin` is: the defaults were reasoned about, and the tests are the only caller that needs a compressed version of them. |
 

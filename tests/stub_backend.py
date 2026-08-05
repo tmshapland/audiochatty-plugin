@@ -10,6 +10,11 @@ the first `GET` — so requests are keyed by path *without* the query string, an
 `entry["query"]` carries the parsed parameters. Existing POST assertions are unaffected:
 none of them has a query string to lose.
 
+`voice_approval_plan.md` Phase 3 added the first routes with an **id in the path**, which
+is why there is now a template alongside it: `/agent/question/abc/expire` records as
+itself and also matches `/agent/question/:id/expire`, so a test can queue a reply or
+assert on a route without first knowing the id the stub is about to invent.
+
 It deliberately does *not* validate bodies the way the real backend does. The real
 backend's normalisation is tested in `audiochat-backend/tests/test_agent_routes.py`;
 duplicating it here would only prove the two fakes agree with each other.
@@ -78,8 +83,10 @@ class StubBackend:
     # -- assertions --
 
     def requests_to(self, path: str) -> list[dict]:
+        """Every request to that path, by its literal path *or* its template — so
+        `requests_to("/agent/question/:id")` finds the poll without knowing the id."""
         with self._lock:
-            return [r for r in self.requests if r["path"] == path]
+            return [r for r in self.requests if path in (r["path"], r["template"])]
 
     def last_request(self, path: str) -> dict | None:
         matching = self.requests_to(path)
@@ -124,7 +131,30 @@ DEFAULTS: dict[str, tuple[int, dict]] = {
     "/agent/inbound": (200, {"messages": []}),
     "/agent/inbound/ack": (200, {"message_ids": []}),
     "/agent/session/verified": (200, {"status": "verified"}),
+    # Voice approval. The default for a poll is `pending` on purpose: a test that wants an
+    # answer queues one, and a test that wants the hold to run down queues nothing.
+    "/agent/question": (202, {"question_id": "55555555-5555-5555-5555-555555555555",
+                              "status": "pending"}),
+    "/agent/question/:id": (200, {"question_id": "55555555-5555-5555-5555-555555555555",
+                                  "status": "pending", "answer_option_id": None}),
+    "/agent/question/:id/expire": (200, {"question_id": "55555555-5555-5555-5555-555555555555",
+                                         "status": "expired"}),
 }
+
+
+def path_template(path: str) -> str:
+    """`/agent/question/<uuid>/expire` → `/agent/question/:id/expire`.
+
+    Only the question routes have an id in them, so this recognises those three rather
+    than trying to be a router. Anything else is its own template, which is what keeps
+    every existing `requests_to("/agent/turn")` assertion working unchanged.
+    """
+    parts = path.strip("/").split("/")
+    if len(parts) == 3 and parts[:2] == ["agent", "question"]:
+        return "/agent/question/:id"
+    if len(parts) == 4 and parts[:2] == ["agent", "question"] and parts[3] in ("expire", "answer"):
+        return f"/agent/question/:id/{parts[3]}"
+    return path
 
 
 def _make_handler(backend: StubBackend):
@@ -146,10 +176,12 @@ def _make_handler(backend: StubBackend):
         def _handle(self, body: dict) -> None:
             split = urlsplit(self.path)
             path = split.path
+            template = path_template(path)
 
             backend.record(
                 {
                     "path": path,
+                    "template": template,
                     "query": {k: v[0] for k, v in parse_qs(split.query).items()},
                     "body": body,
                     "method": self.command,
@@ -158,7 +190,8 @@ def _make_handler(backend: StubBackend):
                 }
             )
 
-            queued = backend.next_reply(path)
+            # Literal path first, so a test can still script one specific id.
+            queued = backend.next_reply(path) or backend.next_reply(template)
             if queued:
                 if queued["delay"]:
                     import time
@@ -167,7 +200,9 @@ def _make_handler(backend: StubBackend):
                 self._send(queued["status"], queued["body"])
                 return
 
-            status, payload = DEFAULTS.get(path, (404, {"error": "not found"}))
+            status, payload = DEFAULTS.get(
+                path, DEFAULTS.get(template, (404, {"error": "not found"}))
+            )
             self._send(status, payload)
 
         def _send(self, status: int, payload: dict) -> None:

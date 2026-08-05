@@ -45,6 +45,8 @@ import os
 import threading
 import time
 
+from wrapper.store import debug
+
 PASTE_START = b"\x1b[200~"
 PASTE_END = b"\x1b[201~"
 SUBMIT = b"\r"
@@ -217,6 +219,7 @@ class Injector:
             with self._lock:
                 self._awaiting = None
                 self._delivered.append(message_id)
+            debug(f"submitted paste for message_id={message_id!r}")
             if self._on_delivered:
                 self._on_delivered()
 
@@ -229,6 +232,10 @@ class Injector:
             if write_all(master_fd, encode_paste(text)):
                 with self._lock:
                     self._awaiting = (time.monotonic() + self._submit_delay, message_id)
+                debug(
+                    f"typed paste for message_id={message_id!r}; "
+                    f"awaiting submit in {self._submit_delay}s"
+                )
         except OSError:
             # The pty is gone, which means the child is gone and the wrapper is on its way
             # out. Dropping it here is right: the ledger only records an id after a
@@ -249,6 +256,7 @@ class Injector:
         with self._lock:
             self._pending.append((cleaned, message_id if message_id is None else str(message_id)))
             count = len(self._pending)
+        debug(f"enqueued instruction (message_id={message_id!r}); {count} pending")
         if self._wake:
             self._wake()
         return count

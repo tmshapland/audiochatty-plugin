@@ -40,10 +40,21 @@ RENDEZVOUS_VERSION = 1
 _PID_FILE = re.compile(r"^\d+\.json$")
 
 
+_verbose = False
+
+
+def set_verbose(value: bool) -> None:
+    """`--verbose` reaches the same narration `AUDIOCHATTY_DEBUG=1` does, without setting the
+    env var itself — `__main__.py`'s `child_env` is a copy of `os.environ`, and mutating that
+    would leak the setting into the wrapped `claude` process too."""
+    global _verbose
+    _verbose = bool(value)
+
+
 def debug(message: str) -> None:
-    """`AUDIOCHATTY_DEBUG=1` narrates the wrapper. Stderr only, and never stdout: stdout is
-    the child's screen, and a stray line there is a corrupted TUI."""
-    if os.environ.get("AUDIOCHATTY_DEBUG"):
+    """`AUDIOCHATTY_DEBUG=1` or `--verbose` narrates the wrapper. Stderr only, and never
+    stdout: stdout is the child's screen, and a stray line there is a corrupted TUI."""
+    if _verbose or os.environ.get("AUDIOCHATTY_DEBUG"):
         print(f"[audiochatty wrapper] {message}", file=sys.stderr, flush=True)
 
 

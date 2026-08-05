@@ -263,6 +263,41 @@ def post(
     return _decode(raw)
 
 
+def get(
+    path: str,
+    *,
+    token: str | None = None,
+    base_url: str | None = None,
+    timeout: float = CLI_TIMEOUT,
+) -> dict:
+    """One GET, JSON out. Raises `ApiError` or `TransportError`, exactly as `post` does.
+
+    Added for `poll_question`, which is the first thing here that *reads* rather than
+    reports. Everything else this client does is a POST because everything else is a hook
+    telling the backend something and getting out.
+    """
+    url = f"{base_url or backend_url()}{path}"
+    request = urllib.request.Request(url, method="GET")
+    request.add_header("User-Agent", USER_AGENT)
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        raw = b""
+        try:
+            raw = exc.read()
+        except Exception:
+            pass
+        raise ApiError(exc.code, _decode(raw)) from exc
+    except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as exc:
+        raise TransportError(str(exc)) from exc
+
+    return _decode(raw)
+
+
 def _decode(raw: bytes) -> dict:
     if not raw:
         return {}
@@ -1480,6 +1515,100 @@ def post_session_end(claude_session_id: str) -> str:
     except ApiError as exc:
         return f"rejected-{exc.status}"
     return "sent"
+
+
+# -- the question calls the permission hook makes --------------------------------------
+#
+# `voice_approval_plan.md` Phase 3. These three look like the ingest calls above and are
+# governed by a different rule, so the difference is worth stating once here.
+#
+# `post_turn` must never make the terminal wait. `post_question` is called from a hook
+# whose entire job **is** to make the terminal wait (D2) — the session is frozen on
+# purpose while somebody decides by voice. So the timeouts here are per-request, not a
+# budget for the whole exchange, and the hold that spans them lives in the hook.
+#
+# What does not change is D3: every failure on this path falls through to Claude Code's
+# own dialog. Never auto-deny, never auto-allow. That is why each of these returns a
+# reason string rather than raising, and why the hook treats every reason that is not a
+# real answer the same way — by saying nothing.
+
+
+def post_question(claude_session_id: str, question: dict) -> tuple[str, str]:
+    """`POST /agent/question`. Returns `(reason, question_id)`; the id is `""` unless the
+    reason is `"raised"`.
+
+    Ordered cheapest-first like `post_turn`, and it honours the same circuit breaker: if
+    the backend was unreachable a moment ago there is no point freezing a terminal for two
+    seconds to discover it again. A breaker-open question falls straight through to the
+    dialog, which is the correct answer while the backend is down.
+    """
+    if breaker_is_open():
+        return "breaker-open", ""
+    token = device_token()
+    if not token:
+        return "not-paired", ""
+
+    body = dict(question)
+    body["claude_session_id"] = claude_session_id
+    try:
+        response = post("/agent/question", body, token=token, timeout=HOOK_TIMEOUT)
+    except TransportError:
+        trip_breaker()
+        return "unreachable", ""
+    except ApiError as exc:
+        # A 404 is the ordinary answer for a session the user disconnected, and a 400 for
+        # a tool call this hook could not shape into a question. Neither is an outage.
+        return f"rejected-{exc.status}", ""
+
+    reset_breaker()
+    question_id = str(response.get("question_id") or "")
+    return ("raised", question_id) if question_id else ("no-id", "")
+
+
+def poll_question(question_id: str) -> tuple[str, dict]:
+    """`GET /agent/question/<id>`. Returns `(reason, view)`.
+
+    `reason` is one of `"ok"` (the view is current), `"unreachable"` (nothing came back),
+    `"gone"` (the backend says there is no such question), or `"not-paired"`.
+
+    **The breaker is deliberately not consulted or tripped here.** It exists to stop a
+    fire-and-forget hook paying a timeout on every turn of an outage; this caller is
+    already inside a hold it chose to enter, and letting one slow poll silence the *next
+    hour's* turns would be the tail wagging the dog. The hook counts its own consecutive
+    failures instead.
+    """
+    token = device_token()
+    if not token:
+        return "not-paired", {}
+    try:
+        view = get(f"/agent/question/{question_id}", token=token, timeout=HOOK_TIMEOUT)
+    except TransportError:
+        return "unreachable", {}
+    except ApiError as exc:
+        if exc.status == 404:
+            return "gone", {}
+        return "unreachable", {}
+    return "ok", view
+
+
+def expire_question(question_id: str) -> str:
+    """`POST /agent/question/<id>/expire` — the hold ran down and the dialog is about to
+    render, so stop offering the decision to somebody's phone.
+
+    Best effort by construction. The hook is on its way to falling through and nothing it
+    learns here changes that, so every failure is the same shrug. The cost of a missed
+    expire is one stale row, which the voice side ages out on its own.
+    """
+    token = device_token()
+    if not token:
+        return "not-paired"
+    try:
+        post(f"/agent/question/{question_id}/expire", {}, token=token, timeout=HOOK_TIMEOUT)
+    except TransportError:
+        return "unreachable"
+    except ApiError as exc:
+        return f"rejected-{exc.status}"
+    return "expired"
 
 
 # -- odds and ends ---------------------------------------------------------------------
