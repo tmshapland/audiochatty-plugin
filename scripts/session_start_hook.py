@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """The `SessionStart` hook — connect the one kind of session the wrapper can't name itself.
 
-`wrapper_return_path_plan.md` Phase 6.5 · W13.
-
 `audiochatty run` connects its own session (`wrapper/connect.py`), because it mints the
 session id and passes `--session-id`. That covers every ordinary launch. It does not cover
 `--resume`, `--continue`, or an explicit `--session-id`, where the id is the user's to
@@ -37,7 +35,7 @@ Two cases it deliberately declines:
   typed `/audiochatty-connect` is how you come back.
 - **A forked session** (`--fork-session`, `/fork`, `/branch`). It gets a new session id and
   inherits the wrapper's environment, so `find_wrapper` reports `session_mismatch` — the
-  same W3 refusal a nested plain `claude` gets, for the same reason: the terminal belongs
+  same refusal a nested plain `claude` gets, for the same reason: the terminal belongs
   to the original session.
 """
 

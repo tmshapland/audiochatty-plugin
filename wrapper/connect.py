@@ -1,7 +1,5 @@
 """Connecting the session this wrapper started, without anyone typing anything.
 
-`wrapper_return_path_plan.md` Phase 6.5 · W13.
-
 Until this existed, `audiochatty run` opened a return path and then waited to be told it
 was wanted: a user had to run `/audiochatty-connect` inside the session, every session,
 forever. That step never did any work the wrapper couldn't do — it was only the thing that
@@ -21,10 +19,10 @@ is three decisions:
    read its id off the hook payload. The two halves are disjoint by construction, so they
    can never race to register the same session.
 
-2. **Silence.** 👤 confirmed it (2026-07-29). There is nowhere to print: stdout is the
-   child's screen and a stray line there is a corrupted TUI, and stderr is no better once
-   the TUI owns the display. So the confirmation is the session appearing on the user's
-   phone, and `AUDIOCHATTY_DEBUG=1` is what narrates it locally.
+2. **Silence.** There is nowhere to print: stdout is the child's screen and a stray line
+   there is a corrupted TUI, and stderr is no better once the TUI owns the display. So the
+   confirmation is the session appearing on the user's phone, and `AUDIOCHATTY_DEBUG=1` is
+   what narrates it locally.
 
 3. **Where a failure goes instead.** Because of (2), a failed connect has no voice at all
    — so the reason is written into the rendezvous file and `/audiochatty-status` reads it
@@ -56,7 +54,7 @@ def in_process_bind(state: WrapperState, *, claude_session_id: str, base: str, t
     """The bind, as `connect_session` wants it: one callable that raises on failure.
 
     No loopback hop — this *is* the wrapper, so it calls its own bind rules directly. The
-    W3 session check inside them is satisfied by construction here (we are binding the id
+    session check inside them is satisfied by construction here (we are binding the id
     we minted), and `ApiError` is raised for a refusal so the caller's rollback path is the
     same one the slash command takes.
     """
@@ -119,7 +117,7 @@ def connect(state: WrapperState, *, name: str | None = None, repo_path: str | No
         ),
         wrapper_pid=snapshot.get("pid"),
         wrapper_port=snapshot.get("port"),
-        # W13. There is no connect *turn* to swallow here — the next turn this session ends
+        # There is no connect *turn* to swallow here — the next turn this session ends
         # is the user's real first piece of work, and they should hear about it.
         skip_next_turn=False,
     )

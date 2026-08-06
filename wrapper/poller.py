@@ -1,16 +1,9 @@
 """Fetching what you said, and getting it typed in.
 
-`wrapper_return_path_plan.md` Phase 2 · W6, W8, W9, W10. Ported from
-`channel/server.ts:383-401` (the ledger), `:521` (verification), `:570` (`parseInbound`),
-`:612` (the poll loop) and `:655` (`deliver`). The numbers below are the old numbers and
-the reasoning is the old reasoning — W10's whole point is that nothing about the queue
-changed when the delivery mechanism did.
-
-**Phase 4 deleted `channel/server.ts`**, so every `channel/server.ts:NNN` citation in this
-package now resolves only in git history (`git show HEAD~1:channel/server.ts`, or the last
-commit that has it). They are kept rather than stripped because provenance is the reason to
-trust a number like the 5s/30s/60s triple: it was tuned against a real backend once, and a
-reader who wants to change it should be able to find out what it was tuned against.
+The numbers below are the old numbers and the reasoning is the old reasoning — nothing
+about the queue changed when the delivery mechanism moved from the old channel to this
+wrapper. They were tuned against a real backend once, which is the reason to trust a number
+like the 5s/30s/60s triple.
 
 ## How a laptop behind NAT hears anything
 
@@ -25,14 +18,14 @@ service must not become a hot loop.
     type it in  →  write the ledger  →  ack the backend
 
 A crash between the first two replays into a duplicate; a crash between the last two
-replays into a dedupe. Delivery is at-least-once (W9) and the ledger is what turns that
+replays into a dedupe. Delivery is at-least-once and the ledger is what turns that
 into exactly-once, so the ledger has to be the *earlier* of the two records. An instruction
 edits files on someone's machine — a duplicate is the expensive direction to fail in.
 
 The one difference from the old channel is where "typed it in" comes from. `mcp.notification()`
 resolved when the bytes hit the transport, so the old code knew synchronously. Here the
-bytes go into a pty on the *proxy* thread, and possibly not for a while: W6 holds an
-injection back until the user has stopped typing. So this loop hands text to the
+bytes go into a pty on the *proxy* thread, and possibly not for a while: an injection is
+held back until the user has stopped typing. So this loop hands text to the
 `Injector` and waits to be told it landed (`Injector.drain_delivered`), and nothing reaches
 the ledger — or the ack — until it actually did. An instruction still queued in the
 injector is deliberately in neither, which is why a wrapper killed mid-hold re-delivers it
@@ -52,7 +45,7 @@ from urllib.parse import quote
 from wrapper import inject
 from wrapper.store import debug, read_json, safe_filename, wrappers_dir, write_private_json
 
-# -- the numbers, unchanged from `channel/server.ts:86-108` ------------------------------
+# -- the numbers, unchanged from the old channel -----------------------------------------
 
 #: While something could plausibly be in flight.
 POLL_ACTIVE = 5.0
@@ -104,10 +97,9 @@ class BackendError(Exception):
 def parse_inbound(payload) -> list[dict]:
     """Normalise whatever came back into the four fields we use.
 
-    Ported from `parseInbound` (`channel/server.ts:570`), and the dropping matters more here
-    than it did there: a malformed row must never turn into an actual keystroke. A row with
-    no id cannot be deduped, and a row with no text has nothing to say, so neither is worth
-    the risk of guessing about.
+    The dropping matters: a malformed row must never turn into an actual keystroke. A row
+    with no id cannot be deduped, and a row with no text has nothing to say, so neither is
+    worth the risk of guessing about.
     """
     if isinstance(payload, list):
         rows = payload
@@ -135,14 +127,14 @@ def parse_inbound(payload) -> list[dict]:
     return messages
 
 
-# -- the delivered ledger (W9) -----------------------------------------------------------
+# -- the delivered ledger ----------------------------------------------------------------
 
 
 class DeliveredLedger:
     """Which instructions have already been typed into this session.
 
     **Keyed by Claude Code session, not by pid**, and that is the requirement rather than a
-    detail: W9 asks that a crash partway through delivering a message cannot type it twice,
+    detail: a crash partway through delivering a message must not type it twice,
     and a restart is a new pid — so a pid-keyed ledger would be empty exactly when it is
     needed. What survives a restart is the session: the user relaunches, runs
     `/audiochatty-connect`, and the same `claude_session_id` binds again. The rendezvous
@@ -209,7 +201,7 @@ class Poller:
         self._ledger: DeliveredLedger | None = None
         #: Handed to the injector but not yet typed. Neither delivered nor forgettable —
         #: without this a second poll would enqueue the same instruction again while the
-        #: first copy was still waiting out W6's quiet period.
+        #: first copy was still waiting out the quiet period.
         self._inflight: set[str] = set()
         #: Typed, in the ledger, but the backend has not confirmed the ack. Retried.
         self._unacked: set[str] = set()
@@ -231,12 +223,12 @@ class Poller:
             self._ledger = DeliveredLedger(binding["claude_session_id"])
             self._inflight = set()
             self._unacked = set()
-            # W8's loose end. `/audiochatty-connect` posts `/agent/session/verified` itself
-            # and is told not to fail hard if that call does not land, so unless it says
-            # otherwise the wrapper assumes the backend has not heard and keeps trying. The
-            # default is the safe direction: the cost of being wrong is one redundant POST,
-            # and the cost of the other default is a reachable session the user is told
-            # they cannot talk to.
+            # The verification loose end. `/audiochatty-connect` posts
+            # `/agent/session/verified` itself and is told not to fail hard if that call does
+            # not land, so unless it says otherwise the wrapper assumes the backend has not
+            # heard and keeps trying. The default is the safe direction: the cost of being
+            # wrong is one redundant POST, and the cost of the other default is a reachable
+            # session the user is told they cannot talk to.
             self._verified_reported = bool(binding.get("verified_reported"))
             self._wake = threading.Event()
             self._thread = threading.Thread(
@@ -292,16 +284,15 @@ class Poller:
 
         **Started by the bind, and no longer by a handshake — this is a reversal, and the
         comment it replaces was bought with a real session.** The old channel deliberately
-        waited for `audiochatty_ack` before its first poll (`channel/server.ts:596-611`),
-        for two reasons. The first was cosmetic and is gone with the handshake itself: a
-        handshake event and an instruction arriving in the same batch read to the model as
-        one notification with two paragraphs, and it answered the handshake and ignored the
-        instruction. The second was real — *never inject into a session that has not proven
-        it can receive* — and that failure mode no longer exists. A channel could not tell
-        whether its notifications were being honoured; this process owns the pty, so a bind
-        that succeeded *is* the proof (W8). Waiting would now buy nothing and cost the user
-        a delay on the one instruction most likely to be already queued: the one they spoke
-        to a session that has since restarted.
+        waited for `audiochatty_ack` before its first poll, for two reasons. The first was
+        cosmetic and is gone with the handshake itself: a handshake event and an instruction
+        arriving in the same batch read to the model as one notification with two paragraphs,
+        and it answered the handshake and ignored the instruction. The second was real —
+        *never inject into a session that has not proven it can receive* — and that failure
+        mode no longer exists. A channel could not tell whether its notifications were being
+        honoured; this process owns the pty, so a bind that succeeded *is* the proof. Waiting
+        would now buy nothing and cost the user a delay on the one instruction most likely to
+        be already queued: the one they spoke to a session that has since restarted.
         """
         empty_polls = 0
         debug("poll loop started")
@@ -364,8 +355,7 @@ class Poller:
     def _deliver(self, messages: list[dict]) -> None:
         """Hand anything new to the injector, and re-ack anything the backend re-served.
 
-        Ported from `deliver` (`channel/server.ts:655`), with the retry-on-next-check from
-        `:698` as the last block.
+        The retry-on-next-check is the last block.
         """
         with self._lock:
             ledger = self._ledger
@@ -397,9 +387,9 @@ class Poller:
         if queued:
             debug(f"queued {queued} instruction(s) for injection")
 
-        # `channel/server.ts:698`'s retry-on-next-check: anything the backend served that we
-        # have already typed means an ack that never landed. Say it again rather than
-        # letting the same instruction come back forever.
+        # The retry-on-next-check: anything the backend served that we have already typed
+        # means an ack that never landed. Say it again rather than letting the same
+        # instruction come back forever.
         with self._lock:
             for message in messages:
                 if message["id"] in ledger:

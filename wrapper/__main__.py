@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """`audiochatty run` — Claude Code, wrapped, with a return path.
 
-`wrapper_return_path_plan.md` Phase 1 · W1, W3, W5, W6, W8, W9.
-
-This process is the replacement for `channel/server.ts`. The old return path was a Claude
-Code *plugin*, and loading it needed `--dangerously-load-development-channels`, which
-prints a warning about untrusted development content. 👤 rejected asking users to do that
-(2026-07-29), so the delivery mechanism moved out of the session and in front of it:
+This process is the replacement for the old return path, which was a Claude Code *plugin*
+whose loading needed `--dangerously-load-development-channels` — a flag that prints a
+warning about untrusted development content. Rather than ask users to do that, the delivery
+mechanism moved out of the session and in front of it:
 
     you  ─keystrokes─▶  this process  ─▶  a pty  ─▶  claude
                              ▲
@@ -19,20 +17,19 @@ session's point of view somebody typed something.
 **Stdlib only**, like the rest of `scripts/`. The old Bun-based channel broke the plugin's
 "read the code, then install it — no build step" promise; this puts it back.
 
-## The local API — frozen (Phase 1's first obligation)
+## The local API — frozen
 
-Phase 3 (`scripts/audiochat.py`) is written against *this section and nothing else*. It
-does not import this package and must never need to.
+`scripts/audiochat.py` is written against *this section and nothing else*. It does not
+import this package and must never need to.
 
-**How a slash command finds its wrapper (W3).** Two environment variables are set in the
+**How a slash command finds its wrapper.** Two environment variables are set in the
 environment `claude` inherits, so everything the session runs can read them:
 
     AUDIOCHATTY_WRAPPER_PORT   the loopback port below
     AUDIOCHATTY_WRAPPER_PID    this process's pid, i.e. which rendezvous file is ours
 
 That is the whole of the correlation mechanism. It replaces ~200 lines of process-table
-inspection in the old design (`audiochat.py:344-541`), which tried to answer "which
-session am I?" by reading `ps`.
+inspection in the old design, which tried to answer "which session am I?" by reading `ps`.
 
 **The rendezvous file**, `~/.audiochatty/wrappers/<pid>.json`, mode 0600, written
 atomically (`AUDIOCHATTY_HOME` overrides `~/.audiochatty`, as everywhere else here):
@@ -54,22 +51,23 @@ atomically (`AUDIOCHATTY_HOME` overrides `~/.audiochatty`, as everywhere else he
       "backend_url": null,
       "bound_at": null,
       "verified_at": null,
-      "connect_error": null,        # W13; see below
+      "connect_error": null,        # see below
       "connect_error_at": null
     }
 
-`connect_error` is Phase 6.5's addition and the only field here that exists for a *user* to
-read rather than a program. W13 made connecting happen at launch and print nothing, so a
-failure has nowhere to go; this is where it goes, and `/audiochatty-status` turns the code
-into a sentence. Additive, like `polling` and `verified_reported` before it — a reader that
-ignores it is still correct.
+`connect_error` is the only field here that exists for a *user* to read rather than a
+program. Connecting happens at launch and prints nothing, so a failure has nowhere to go;
+this is where it goes, and `/audiochatty-status` turns the code into a sentence. Additive,
+like `polling` and `verified_reported` before it — a reader that ignores it is still
+correct.
 
 **The device token is deliberately not in here.** It lives in `credentials.json` and has
 no business being copied into a second file. Everything above is either public (a port, a
 pid) or already known to whoever can read the directory.
 
-`expected_session_id` is the safety check W3 asks for. The wrapper mints a uuid and starts
-`claude --session-id <uuid>`, so it knows its child's session id *before* anything binds,
+`expected_session_id` is the safety check that pins a bind to the right session. The
+wrapper mints a uuid and starts `claude --session-id <uuid>`, so it knows its child's
+session id *before* anything binds,
 and `/bind` can refuse a session id that isn't its own. Without it, this leaks: a session
 started by this wrapper runs a Bash tool call, someone types plain `claude` inside it, that
 inner session inherits `AUDIOCHATTY_WRAPPER_PORT`, and `/audiochatty-connect` there would
@@ -88,7 +86,7 @@ a session it does not own.
                          agent_session_id, verified}
                     400 invalid_json | missing_fields
                     403 token_mismatch
-                    409 session_mismatch   — not the session this wrapper started (W3)
+                    409 session_mismatch   — not the session this wrapper started
                     409 already_bound      — bound to a different session already
 
     POST /unbind    {token?}
@@ -106,43 +104,40 @@ a session it does not own.
                     403 token_mismatch
                     409 not_bound
 
-`/inject` is a **deviation from the plan's three-endpoint list**, and worth the extra
-surface for two reasons: Phase 1 has to prove "injected text actually reaches the child"
-and nothing else can trigger an injection until Phase 2's poller exists, and Phase 8's
-Stop-hook fast path needs exactly this door. It is the sharp edge in this whole design —
-anything that can reach this port and read `credentials.json` can type anything into your
-terminal — which is why it is token-gated, refuses while unbound, and is written up in
-`wrapper/README.md` in those words.
+`/inject` is a fourth endpoint beyond the core three, and worth the extra surface: it is
+how injected text reaches the child, and the Stop-hook fast path needs exactly this door.
+It is the sharp edge in this whole design — anything that can reach this port and read
+`credentials.json` can type anything into your terminal — which is why it is token-gated,
+refuses while unbound, and is written up in `wrapper/README.md` in those words.
 
-Two fields on that list are Phase 2's, and both are additive — Phase 3 can ignore either
-and still be correct. `verified_reported` on `/bind` is how `/audiochatty-connect` says it
-has already told the backend this session is reachable; leaving it out means the poll loop
-keeps trying until the backend confirms, which is the safe default (`poller.Poller.start`).
-`polling` on `/status` answers the one question the rendezvous file cannot: bound, but is
-anything actually asking?
+Two fields on that list are additive — a caller can ignore either and still be correct.
+`verified_reported` on `/bind` is how `/audiochatty-connect` says it has already told the
+backend this session is reachable; leaving it out means the poll loop keeps trying until
+the backend confirms, which is the safe default (`poller.Poller.start`). `polling` on
+`/status` answers the one question the rendezvous file cannot: bound, but is anything
+actually asking?
 
 ## What runs, in what order, and why the order is load-bearing
 
     1. bind the loopback socket        → we need its port before the child exists
     2. spawn `claude` on a pty         → still single-threaded: see below
     3. start the control server thread → now threads are allowed
-    3a. connect this session (W13)     → on a thread; never blocks the terminal
+    3a. connect this session           → on a thread; never blocks the terminal
     4. run the proxy loop              → until the child exits
     5. exit with the child's code      → `audiochatty run` behaves like `claude` in a script
 
-Step 3a is Phase 6.5 and it is what makes `audiochatty run` the whole of the setup: the
-wrapper registers its own session and binds itself, so nothing has to be typed into the
-session. It comes after step 3 because the bind starts the poll loop and the control server
-has to be up, and it runs on a thread because a sleeping backend must never make a terminal
-wait. See `connect.py`, which also documents the one case it hands off to a `SessionStart`
-hook (`--resume`, where the session id isn't ours to mint).
+Step 3a is what makes `audiochatty run` the whole of the setup: the wrapper registers its
+own session and binds itself, so nothing has to be typed into the session. It comes after
+step 3 because the bind starts the poll loop and the control server has to be up, and it
+runs on a thread because a sleeping backend must never make a terminal wait. See
+`connect.py`, which also documents the one case it hands off to a `SessionStart` hook
+(`--resume`, where the session id isn't ours to mint).
 
 **This is where the old "an unbound wrapper makes zero network calls" property went.** It
-held while connecting was a separate act, Phase 2 measured it, and W13 spends it knowingly:
-on a paired machine every wrapped launch now registers and starts polling. The property
-survives in exactly one case, and it is worth keeping — an *unpaired* machine still does
-nothing and calls nothing, so `audiochatty run` before the machine is paired is indis-
-tinguishable from plain `claude`.
+held while connecting was a separate act, and this spends it knowingly: on a paired machine
+every wrapped launch now registers and starts polling. The property survives in exactly one
+case, and it is worth keeping — an *unpaired* machine still does nothing and calls nothing,
+so `audiochatty run` before the machine is paired is indistinguishable from plain `claude`.
 
 Steps 1-3 are in that order because step 2 forks, and `subprocess`'s `preexec_fn` runs
 Python between the fork and the exec. In a process that already has threads, that is a
@@ -197,7 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=float(os.environ.get("AUDIOCHATTY_QUIET_PERIOD", DEFAULT_QUIET_PERIOD)),
         help=(
-            "Seconds of no typing before a spoken instruction is typed in (W6). "
+            "Seconds of no typing before a spoken instruction is typed in. "
             f"Default {DEFAULT_QUIET_PERIOD}."
         ),
     )
@@ -205,7 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--name",
         default=None,
         help="What to call this session in audiochatty. Defaults to the current folder's "
-        "name. Replaces the argument `/audiochatty-connect [name]` used to take (W13).",
+        "name. Replaces the argument `/audiochatty-connect [name]` used to take.",
     )
     run.add_argument(
         "--verbose",
@@ -228,7 +223,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # Before anything else can call `store.debug()` — `prune_stale()` below is the first.
     store.set_verbose(args.verbose)
 
-    # W13's hook-free half: we choose the session id, so we know it before the session
+    # The hook-free half: we choose the session id, so we know it before the session
     # exists. See the `expected_session_id` note in the module docstring for what it buys.
     expected_session_id: str | None = None
     if not any(a in SESSION_DECIDING_ARGS for a in claude_args):
@@ -288,7 +283,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         control.close()
         raise
 
-    # 3a. W13: connect this session ourselves, on a thread, silently. After step 3 because
+    # 3a. Connect this session ourselves, on a thread, silently. After step 3 because
     # the poll loop is started by the bind and the control server has to be up; on a thread
     # because a sleeping backend must not delay a terminal that is already drawing. An
     # unpaired machine makes no network call at all — see `connect.connect`.
@@ -299,7 +294,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     finally:
         # The control port first, so nothing can bind while we are shutting down; then the
         # poller, whose last act is to record anything the injector typed but had not yet
-        # reported (W9); then the rendezvous file, because a file for a process that has
+        # reported; then the rendezvous file, because a file for a process that has
         # exited is worse than no file at all.
         control.close()
         poller.close()

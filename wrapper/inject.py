@@ -1,10 +1,8 @@
 """Typing into the session on your behalf.
 
-`wrapper_return_path_plan.md` Phase 1 · W5, W6.
-
 Two rules, and each one exists because of a specific way this goes wrong.
 
-**W5 — a spoken instruction is one paste, not a stream of keystrokes.** A single instruction
+**A spoken instruction is one paste, not a stream of keystrokes.** A single instruction
 from audiochatty routinely carries several turns' worth of speech joined by blank lines.
 Written raw into the pty, Claude Code's prompt would submit at the first newline and treat
 the rest as a second instruction. So the text goes in wrapped in the terminal's
@@ -13,7 +11,7 @@ a single Enter after the closing marker. Inside a real paste an emulator sends C
 break (xterm translates LF→CR on paste, and iTerm2 and VS Code's terminal follow it), so
 that is what goes on the wire here too.
 
-**W6 — never type over the user.** The wrapper sees every key on its way to the child, so
+**Never type over the user.** The wrapper sees every key on its way to the child, so
 it knows to the millisecond when the human last typed. An instruction that arrives
 mid-sentence waits for a pause. This is the one thing tmux could never do (`send-keys`
 cannot see your keystrokes) and it is the defence against the worst failure mode in this
@@ -25,8 +23,8 @@ swallows it: the instruction lands in the prompt box, correct and complete, and 
 there until a human presses Return. Measured against the real TUI (2.1.221) it is a race,
 not a deterministic bug, which is the worst shape this could have taken: 4 of 6 single-line
 instructions submitted and 2 hung, while multi-line ones happened to submit every time. That
-is why it survived Phase 0's spike — a hand-driven test with a few lines of dictation passes
-— and why `tests/test_wrapper.py`'s fake child could never have caught it. The trigger is the
+is why a hand-driven test with a few lines of dictation passes, and why
+`tests/test_wrapper.py`'s fake child could never have caught it. The trigger is the
 paste and the CR arriving in one `read()`, so a separate `os.write` alone does **not** fix it
 (measured: still hangs); the bytes coalesce in the pty. Only a real gap does. 30ms was enough
 in every trial, 150ms is the shipped value, and the delay is why `flush` below is a state
@@ -52,8 +50,7 @@ PASTE_END = b"\x1b[201~"
 SUBMIT = b"\r"
 
 # A single instruction, capped. Spoken text is short; this is a guard against a backend that
-# has gone wrong, not a policy about how much someone can say. Same number, same reasoning,
-# as `MAX_CONTENT_CHARS` in `channel/server.ts`.
+# has gone wrong, not a policy about how much someone can say.
 MAX_CONTENT_CHARS = 20_000
 
 # How long the user has to have stopped typing. Long enough that a pause for thought
@@ -66,15 +63,15 @@ DEFAULT_QUIET_PERIOD = 1.5
 # a person would notice the prompt pause before it submits. It is a deliberately generous
 # multiple because the failure it prevents is silent: the instruction looks delivered.
 #
-# It does cost a sliver of W6. For these 150ms the paste is in the prompt un-submitted, so a
-# keystroke landing in that window joins the text that is about to be sent. The window only
-# opens after the user has already been quiet for `quiet_period` (a hundred times longer), so
-# this trades a rare, small mess for a common, silent failure — but it is the reason not to
-# raise this number casually.
+# It does cost a sliver of the never-type-over-the-user guarantee. For these 150ms the paste
+# is in the prompt un-submitted, so a keystroke landing in that window joins the text that is
+# about to be sent. The window only opens after the user has already been quiet for
+# `quiet_period` (a hundred times longer), so this trades a rare, small mess for a common,
+# silent failure — but it is the reason not to raise this number casually.
 SUBMIT_DELAY = 0.15
 
 # Only these two survive the control-character filter: a paste can legitimately contain a
-# newline (that is the entire reason W5 exists) and a tab.
+# newline (that is the entire reason bracketed paste exists) and a tab.
 _KEEP = {"\n", "\t"}
 
 
@@ -113,10 +110,9 @@ def write_all(fd: int, data: bytes) -> int:
 def type_text(master_fd: int, text: str, *, submit_delay: float = SUBMIT_DELAY) -> int:
     """Type `text` into the pty as one bracketed paste, then Enter. Returns bytes written.
 
-    The signature the plan names. **This one sleeps**, so it is for callers that own their
-    thread — a script, a test. The proxy loop must not use it: `Injector.flush` splits the
-    same two writes across loop passes instead, because a proxy thread asleep for 150ms is a
-    terminal frozen for 150ms.
+    **This one sleeps**, so it is for callers that own their thread — a script, a test. The
+    proxy loop must not use it: `Injector.flush` splits the same two writes across loop
+    passes instead, because a proxy thread asleep for 150ms is a terminal frozen for 150ms.
     """
     data = encode_paste(text)
     if not data:
@@ -129,9 +125,9 @@ def type_text(master_fd: int, text: str, *, submit_delay: float = SUBMIT_DELAY) 
 class Injector:
     """The queue between "an instruction arrived" and "the user has stopped typing".
 
-    `enqueue` is called from other threads (the control server now, Phase 2's poller
-    later); `flush` is called only from the proxy loop, which is what keeps two threads from
-    interleaving writes into the same pty.
+    `enqueue` is called from other threads (the control server and the poller); `flush` is
+    called only from the proxy loop, which is what keeps two threads from interleaving writes
+    into the same pty.
     """
 
     def __init__(
@@ -166,7 +162,7 @@ class Injector:
     def set_on_delivered(self, callback) -> None:
         """Called once, after any flush that actually wrote something.
 
-        Phase 2's poller is the caller. It needs this because *it* cannot know when the
+        The poller is the caller. It needs this because *it* cannot know when the
         bytes went in — the quiet period means an instruction can be handed over here and
         typed a minute later — and the ack it owes the backend has to follow the typing, not
         the handing over. See `poller.py`'s note on the order.
@@ -180,7 +176,8 @@ class Injector:
 
     def next_timeout(self, default: float) -> float:
         """How long the proxy loop may sleep. With something pending, no longer than the
-        remaining quiet period, or W6 turns a 1.5s hold into a 1.5s + one-poll hold."""
+        remaining quiet period, or the quiet-period hold turns a 1.5s wait into a
+        1.5s + one-poll wait."""
         with self._lock:
             awaiting = self._awaiting
             if awaiting is not None:

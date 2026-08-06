@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 """The `PermissionRequest` hook — Claude Code stops to ask, and audiochatty answers.
 
-`voice_approval_plan.md` Phases 3 and 5.
-
 Every other hook in this plugin reports something and gets out of the way. This one does
 the opposite and it is the only one that does: it **blocks**, for up to ten minutes, while
 the person who owns the terminal decides by voice. Claude Code lets a `PermissionRequest`
-hook return the approve/deny decision itself and never show the dialog (D1), so what a
+hook return the approve/deny decision itself and never show the dialog so what a
 frozen terminal actually means here is "audiochatty is answering *in place of* the dialog",
 not "audiochatty is waiting to type into it". Nothing else can answer the question while
 this hook holds it, which is what makes a stale answer structurally impossible.
 
-**One event covers all three cases** (D6). Phase 0 found `PermissionRequest` fires not just
+**One event covers all three cases** `PermissionRequest` fires not just
 for tools needing approval but for `AskUserQuestion` and `ExitPlanMode` too, with the full
 question list and the full plan text in `tool_input`. So there is one hook, one table and
 one hold, and the only thing that varies is the shape of what gets asked and how the answer
 gets back:
 
     Bash, Edit, an MCP tool…   allow / deny        → `behavior`
-    AskUserQuestion            the real options    → `allow` + `updatedInput.answers` (D9)
+    AskUserQuestion            the real options    → `allow` + `updatedInput.answers`
     ExitPlanMode               approve / reject    → `behavior`, on a *summary* of the plan
 
 The `AskUserQuestion` route is the odd one and is worth knowing about before reading
 `decide`: a multi-choice question is answered by **allowing the tool call with the answer
 written into its input**, so the picker never renders and the model proceeds as though the
-option had been chosen at the keyboard. Proven live in Phase 0.5.
+option had been chosen at the keyboard.
 
 Three rules govern the file, and the middle one is the one to read twice:
 
@@ -32,20 +30,20 @@ Three rules govern the file, and the middle one is the one to read twice:
    does is look for the session's marker file. Permission prompts happen in every terminal
    on the machine; only the ones connected to audiochatty may be frozen by this.
 
-2. **Every failure falls through. Never auto-deny, never auto-allow** (D3). Hold expired,
+2. **Every failure falls through. Never auto-deny, never auto-allow**. Hold expired,
    backend unreachable, session not bound, answer unparseable — all of them exit 0 having
    printed *nothing*, and Claude Code shows its own dialog exactly as it would today.
    Silence is not approval: the docs are explicit that exit 0 with no output continues
    through the normal permission flow. A voice channel that silently denied a tool call
    because you stepped away would be worse than one that just asked at the keyboard, and
    one that silently allowed would be dangerous. This is the single most important safety
-   property in the plan; the tests in `tests/test_permission_hook.py` exist for it.
+   property here; the tests in `tests/test_permission_hook.py` exist for it.
 
-3. **A decision is an option *id*, never a sentence** (D4). The voice agent picks from the
+3. **A decision is an option *id*, never a sentence**. The voice agent picks from the
    list this hook sent and writes back one of those ids. An id this hook does not
    recognise is not interpreted, guessed at, or pattern-matched — it is rule 2.
 
-The correlation key is `prompt_id`, not `tool_use_id`: Phase 0 found `PermissionRequest`
+The correlation key is `prompt_id`, not `tool_use_id`: `PermissionRequest`
 does not actually send `tool_use_id` despite the published field list saying it does.
 
 `AUDIOCHATTY_DEBUG=1` puts the reasoning on stderr, which is where anyone wondering why
@@ -63,9 +61,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import audiochat  # noqa: E402
 
-# How long the terminal is allowed to sit frozen. 👤's call (D2), and 600s because that is
-# the documented default timeout for a `PermissionRequest` hook — the registration in
-# `hooks/hooks.json` sets a longer one so the hold, not the harness, is what ends the wait.
+# How long the terminal is allowed to sit frozen. 600s because that is the documented
+# default timeout for a `PermissionRequest` hook — the registration in `hooks/hooks.json`
+# sets a longer one so the hold, not the harness, is what ends the wait.
 DEFAULT_HOLD_SECONDS = 600.0
 # Between polls. Two seconds is a compromise: the person answering has already spoken by
 # the time this fires, so the felt latency is the round trip, and a 300-poll hold is
@@ -83,7 +81,7 @@ MAX_CONSECUTIVE_POLL_FAILURES = 3
 # command runs, and the backend's cap is about storage while this one is about attention.
 MAX_SUMMARY_CHARS = 400
 
-# What a permission prompt offers. Ids are what come back (D4); labels are what get read
+# What a permission prompt offers. Ids are what come back; labels are what get read
 # out, and they are two words apart by ear rather than two letters.
 ALLOW = "allow"
 DENY = "deny"
@@ -106,7 +104,7 @@ PLAN_OPTIONS = [
 MAX_CHOICE_QUESTIONS = 4
 MAX_CHOICE_OPTIONS = 8
 
-# Of the plan text, read aloud. `tool_input.plan` was 5,000+ characters in Phase 0's sample
+# Of the plan text, read aloud. `tool_input.plan` was 5,000+ characters in the sample
 # — far too long to hear — so what goes out is a *summary* and the plan itself stays on the
 # screen the person can look at.
 MAX_PLAN_HEADINGS = 5
@@ -189,7 +187,7 @@ def _ask(hook: dict, tool_name: str, kind: str, prompt: str, options: list[dict]
         "body": {
             "kind": kind,
             "tool_name": tool_name,
-            # Present in the published field list, absent from the live payload (Phase 0).
+            # Present in the published field list, absent from the live payload.
             # Sent anyway, best-effort: the day it starts arriving it is the better key.
             "tool_use_id": str(hook.get("tool_use_id") or "")[:128],
             "prompt_id": str(hook.get("prompt_id") or "")[:128],
@@ -205,15 +203,15 @@ def _choice_asks(hook: dict, tool_name: str) -> list[dict] | None:
     **Two payloads are deliberately not attempted**, and in both cases falling through is
     the honest answer rather than a limitation worked around:
 
-    * a `multiSelect` question. An answer here is one option id (D4), and there is no
+    * a `multiSelect` question. An answer here is one option id, and there is no
       way to say "these two" in that vocabulary. Guessing at a single pick would be
       answering a different question than the one asked.
     * more than `MAX_CHOICE_QUESTIONS`, or a question with fewer than two options. Neither
       is something `AskUserQuestion`'s own schema produces, so a payload like that is a
       surprise, and surprises go to the keyboard.
 
-    Several questions become several asks answered *in turn* — the plan's rule is answer
-    all of them or fall through, never half (Phase 5), and `collect_answers` enforces that
+    Several questions become several asks answered *in turn* — the rule is answer
+    all of them or fall through, never half, and `collect_answers` enforces that
     by only returning once every one of these has come back.
     """
     tool_input = hook.get("tool_input")
@@ -267,7 +265,7 @@ def _choice_options(raw) -> list[dict]:
 def _plan_prompt(tool_input) -> str:
     """`ExitPlanMode` → something short enough to hear.
 
-    `tool_input.plan` is full markdown and ran past 5,000 characters in Phase 0's sample.
+    `tool_input.plan` is full markdown and ran past 5,000 characters in a real sample.
     Reading that aloud would take minutes, and the person can see the plan on the screen
     anyway — what they need over the phone is enough to recognise *which* plan and how big
     it is. So: its headings, and its size.
@@ -356,10 +354,10 @@ def collect_answers(claude_session_id: str, asks: list[dict]) -> list[tuple[dict
     """Raise each ask and wait for it, sharing one hold across all of them.
 
     Returns `[(ask, option_id), …]` with an entry for **every** ask, or None. There is no
-    partial result and that is the point: Phase 5's rule for a multi-question
-    `AskUserQuestion` is answer all of them or fall through, never half. A hold that runs
-    out on the second of three questions throws away the first answer and shows the
-    dialog, which costs one wasted answer and keeps the invariant.
+    partial result and that is the point: the rule for a multi-question `AskUserQuestion`
+    is answer all of them or fall through, never half. A hold that runs out on the second
+    of three questions throws away the first answer and shows the dialog, which costs one
+    wasted answer and keeps the invariant.
 
     One deadline spans the whole exchange rather than one per question — the thing being
     budgeted is how long the terminal is frozen, and that does not get more acceptable
@@ -455,7 +453,7 @@ def _positive_float(name: str, default: float) -> float:
 def decide(hook: dict, answers: list[tuple[dict, str]]) -> dict | None:
     """The chosen option ids → what Claude Code is told, or None to fall through.
 
-    None is rule 3 and it is the whole reason this is a separate function: the mapping
+    None is rule 3, and it is the whole reason this is a separate function: the mapping
     from id to behaviour is a lookup in the list *this hook sent*, not an interpretation of
     whatever came back. An id that is not in that list is not nearly-an-answer; it is no
     answer, and no answer means the dialog.
@@ -489,13 +487,13 @@ def decide(hook: dict, answers: list[tuple[dict, str]]) -> dict | None:
 
 def _choice_decision(hook: dict, answers: list[tuple[dict, str]]) -> dict | None:
     """A multi-choice question, answered by **allowing the tool call with the answer
-    written into its input** (D9).
+    written into its input**.
 
     `AskUserQuestion`'s own schema carries an `answers` field documented as "user answers
     collected by the permission component" — an object keyed by question text, valued with
     the chosen option's label. Filling it in and allowing the call is what makes the picker
     never render: Claude Code reports it in the transcript as the question having been
-    answered, and the model proceeds. Proven live in Phase 0.5.
+    answered, and the model proceeds.
 
     `updatedInput` is the whole original input with `answers` merged in, not `answers`
     alone. The field is documented as "modified tool arguments", and an input that had lost
@@ -513,7 +511,7 @@ def _choice_decision(hook: dict, answers: list[tuple[dict, str]]) -> dict | None
             return None
         filled[question] = label
 
-    # Never half (Phase 5). Every question in the payload has to have come back.
+    # Never half. Every question in the payload has to have come back.
     if len(filled) != len(answers):
         return None
 

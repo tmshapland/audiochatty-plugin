@@ -1,19 +1,17 @@
 """A stub audiochatty backend, so the plugin's tests run with nothing installed.
 
-`coding_agent_build_plan.md` Phase 5 asks for tests that run without Claude Code. This is
-the other half of that: tests that run without Flask, without Supabase, and without a
-network. It speaks only the routes the plugin knows about, and it records every
-request so a test can assert on what was sent rather than only on what came back.
+The tests run without Claude Code, without Flask, without Supabase, and without a network.
+This stub speaks only the routes the plugin knows about, and it records every request so a
+test can assert on what was sent rather than only on what came back.
 
-`channel_return_path_plan.md` Phase 3 added the three return-path routes and, with them,
-the first `GET` — so requests are keyed by path *without* the query string, and
-`entry["query"]` carries the parsed parameters. Existing POST assertions are unaffected:
-none of them has a query string to lose.
+The return-path routes brought the first `GET` — so requests are keyed by path *without*
+the query string, and `entry["query"]` carries the parsed parameters. POST assertions are
+unaffected: none of them has a query string to lose.
 
-`voice_approval_plan.md` Phase 3 added the first routes with an **id in the path**, which
-is why there is now a template alongside it: `/agent/question/abc/expire` records as
-itself and also matches `/agent/question/:id/expire`, so a test can queue a reply or
-assert on a route without first knowing the id the stub is about to invent.
+The question routes are the first with an **id in the path**, which is why there is a
+template alongside the literal path: `/agent/question/abc/expire` records as itself and
+also matches `/agent/question/:id/expire`, so a test can queue a reply or assert on a route
+without first knowing the id the stub is about to invent.
 
 It deliberately does *not* validate bodies the way the real backend does. The real
 backend's normalisation is tested in `audiochat-backend/tests/test_agent_routes.py`;

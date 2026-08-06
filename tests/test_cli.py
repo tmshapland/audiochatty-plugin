@@ -5,12 +5,12 @@ Every test runs `scripts/audiochat.py` as a subprocess against the stub backend,
 that is already paired, and what it asserts is what the command actually does rather than
 what an imported function returns.
 
-`wrapper_return_path_plan.md` Phase 3 replaced the channel with the wrapper, and this file
-lost a fixture in the process. `FakeClaude` — a real process carrying a real command line —
-existed because `connect` used to answer "which session am I, and were channels enabled?" by
-reading `ps` output. Nothing reads `ps` any more: the answer arrives in an inherited
-environment variable, so the only fixture left is `FakeWrapper`, a real loopback server with
-a real rendezvous file, because `connect`'s job is still to find one of those and POST to it.
+When the channel was replaced by the wrapper, this file lost a fixture. `FakeClaude` — a
+real process carrying a real command line — existed because `connect` used to answer "which
+session am I, and were channels enabled?" by reading `ps` output. Nothing reads `ps` any
+more: the answer arrives in an inherited environment variable, so the only fixture left is
+`FakeWrapper`, a real loopback server with a real rendezvous file, because `connect`'s job
+is still to find one of those and POST to it.
 
 **`run_cli` always sets `AUDIOCHATTY_WRAPPER_*` explicitly, even to remove them.** Whoever
 runs this suite may well be sitting inside a real `audiochatty run`, in which case those
@@ -47,7 +47,7 @@ class FakeWrapper:
 
     The file is written the way `wrapper/store.py` writes it, including `kind` and
     `expected_session_id` — the second of those is what `find_wrapper` compares against to
-    refuse a session that inherited these variables without owning them (W3).
+    refuse a session that inherited these variables without owning them.
 
     `pid` defaults to this test process, because `read_wrappers` requires the pid to be alive
     and to match the file name. `expected_session_id` defaults to `"sess-1"`, the id nearly
@@ -102,7 +102,7 @@ class FakeWrapper:
                     "backend_url": None,
                     "bound_at": stamp if bound_to else None,
                     "verified_at": stamp if verified else None,
-                    # W13. The launch connects silently, so this is where a failure goes.
+                    # The launch connects silently, so this is where a failure goes.
                     "connect_error": connect_error,
                     "connect_error_at": stamp if connect_error else None,
                 }
@@ -320,9 +320,9 @@ class TestPairing(CliTestCase):
         self.assertTrue(body["label"], "the approving browser needs something to show")
 
     def test_pairing_ends_by_naming_the_run_command(self):
-        """R12, and Phase 0's launch decision: the bare command, not an alias. Four surfaces
-        describe this setup and this is the only one we fully control and the only one the
-        user is looking at when the step is due."""
+        """The bare command, not an alias. Four surfaces describe this setup and this is the
+        only one we fully control and the only one the user is looking at when the step is
+        due."""
         self.run_cli("pair-start")
         result = self.run_cli("pair-finish", "--wait", "0")
 
@@ -331,7 +331,7 @@ class TestPairing(CliTestCase):
         self.assertNotIn("dangerously", result.stdout)
 
     def test_pairing_does_not_send_anyone_to_a_second_step(self):
-        """W13. This copy told users to run `/audiochatty-connect` after `audiochatty run`
+        """This copy told users to run `/audiochatty-connect` after `audiochatty run`
         for as long as connecting was a separate act. It isn't one — so naming it here would
         send every new user off to do something that now does nothing."""
         self.run_cli("pair-start")
@@ -341,10 +341,10 @@ class TestPairing(CliTestCase):
         self.assertIn("connects the session for you", result.stdout)
 
     def test_pairing_also_shows_how_to_make_the_command_exist(self):
-        """👤 chose the bare command on the grounds that developers can run commands — but
-        it has to *be* one first, and that is a real install step rather than an alternative
-        way to invoke it. The path is resolved from the plugin, so it is right wherever the
-        plugin was installed."""
+        """The bare command is preferred on the grounds that developers can run commands —
+        but it has to *be* one first, and that is a real install step rather than an
+        alternative way to invoke it. The path is resolved from the plugin, so it is right
+        wherever the plugin was installed."""
         self.run_cli("pair-start")
         result = self.run_cli("pair-finish", "--wait", "0")
 
@@ -361,7 +361,7 @@ class TestPairing(CliTestCase):
 
 class TestPairingInTheWrongState(CliTestCase):
     """Two commands means each can be run when the other one was due. Neither may guess:
-    running the wrong half has to say which half was wrong (👤 2026-08-04)."""
+    running the wrong half has to say which half was wrong."""
 
     def test_pair_start_reshows_a_live_code_instead_of_minting_another(self):
         """A second live code would leave the first one unexpired and typable into `/link`,
@@ -505,7 +505,7 @@ class TestConnect(CliTestCase):
         self.assertTrue(list((self.home / "sessions").glob("*.json")))
 
 
-# -- connect and the return path (W3, W4, W8) --------------------------------------------
+# -- connect and the return path ---------------------------------------------------------
 
 
 class TestConnectBindsTheWrapper(CliTestCase):
@@ -564,7 +564,7 @@ class TestConnectBindsTheWrapper(CliTestCase):
 
 
 class TestConnectMarksTheSessionReachable(CliTestCase):
-    """W8. The old design proved reachability with a nonce, an injected handshake, a tool
+    """The old design proved reachability with a nonce, an injected handshake, a tool
     call from the model, and a retry loop, because a channel could not tell whether its
     events were honoured. The wrapper owns the pty, so binding *is* the proof and the whole
     mechanism collapses into one POST."""
@@ -619,10 +619,9 @@ class TestConnectMarksTheSessionReachable(CliTestCase):
 
 
 class TestConnectRefusals(CliTestCase):
-    """W4, inherited unchanged from R1: a session that can't be talked to isn't registered at
-    all. Each refusal has to happen *before* the registration, or it leaves a live row
-    behind. There is one refusal now where there used to be three — no ambiguity case, and no
-    launch-flag case."""
+    """A session that can't be talked to isn't registered at all. Each refusal has to happen
+    *before* the registration, or it leaves a live row behind. There is one refusal now where
+    there used to be three — no ambiguity case, and no launch-flag case."""
 
     def test_a_session_with_no_wrapper_refuses_and_names_the_run_command(self):
         """The common failure: started with plain `claude`, so nothing can type into it."""
@@ -686,9 +685,9 @@ class TestConnectRefusals(CliTestCase):
         self.assertEqual(self.backend.requests_to("/agent/session"), [])
 
     def test_a_nested_plain_claude_is_refused_by_name(self):
-        """W3's own refusal, and the reason `expected_session_id` exists. A wrapped session
-        runs a Bash tool call, someone types plain `claude` inside it, and that inner session
-        inherits both variables. Binding it would type this user's instructions into a
+        """The nested-session refusal, and the reason `expected_session_id` exists. A wrapped
+        session runs a Bash tool call, someone types plain `claude` inside it, and that inner
+        session inherits both variables. Binding it would type this user's instructions into a
         terminal they can't see. It gets its own message, because telling them to run
         `audiochatty run` would be true and useless — they already are inside one."""
         self.pair()
@@ -717,7 +716,7 @@ class TestConnectRefusals(CliTestCase):
 
     def test_a_wrapper_that_refuses_the_bind_rolls_the_registration_back(self):
         """The one path that has to undo something: registration landed, the bind didn't,
-        and W4 says there is no such thing as a half-registered session."""
+        and there is no such thing as a half-registered session."""
         self.pair()
         self.wrapper.reply(409, {"error": "already_bound"})
 
@@ -945,13 +944,13 @@ class TestDisconnect(CliTestCase):
         self.assertEqual(self.marker(), {})
 
 
-# -- W13: connect is a repair tool now --------------------------------------------------
+# -- connect is a repair tool now --------------------------------------------------------
 
 
 class TestConnectIsARepairTool(CliTestCase):
-    """Phase 6.5. `audiochatty run` connects its own session, so the three reasons left to
-    run this command by hand are: retry after a failed launch connect, rename, and reconnect
-    after a disconnect. The first case it never had to handle before is the one that is now
+    """`audiochatty run` connects its own session, so the three reasons left to run this
+    command by hand are: retry after a failed launch connect, rename, and reconnect after a
+    disconnect. The first case it never had to handle before is the one that is now
     *likely* — being run against a session that is already connected."""
 
     def tombstone(self, claude_session_id: str = "sess-1") -> dict:
@@ -1012,7 +1011,7 @@ class TestConnectIsARepairTool(CliTestCase):
 
 
 class TestDisconnectStaysDisconnected(CliTestCase):
-    """W13's sharpest edge. Connecting is automatic now, and `SessionStart` fires again on
+    """The sharpest edge. Connecting is automatic now, and `SessionStart` fires again on
     `/clear` — so without a record of the user's decision, going quiet would silently undo
     itself. The hook-side half of this is in `test_hooks.py`."""
 
@@ -1060,7 +1059,7 @@ class TestDisconnectStaysDisconnected(CliTestCase):
 
 
 class TestStatusExplainsASilentLaunchFailure(CliTestCase):
-    """W13 made connecting silent, so `/audiochatty-status` is the only place a failed
+    """Connecting is silent, so `/audiochatty-status` is the only place a failed
     connect surfaces at all. The wrapper writes the code; this turns it into a sentence."""
 
     def test_an_unreachable_backend_at_launch_is_named(self):

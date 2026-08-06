@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """The `Stop` hook — one completed turn becomes one audiochatty message.
 
-`coding_agent_build_plan.md` Phase 5 · `coding_agent_summary_plan.md` §4.1, §8.
-
-Two rules govern everything in this file, and both come from the plan's sharp edges:
+Two rules govern everything in this file, and both come from hard-won sharp edges:
 
 1. **Stop hooks are global.** This runs at the end of every turn in every Claude Code
    session on the machine, registered or not. So the very first thing it does — before

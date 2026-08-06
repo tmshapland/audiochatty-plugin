@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """The `SessionEnd` hook — retire a registration, but only for a real ending.
 
-`coding_agent_build_plan.md` Phase 5 · `coding_agent_summary_plan.md` §8.
-
 **This hook exists to be careful about one thing.** `SessionEnd` fires on `/clear` and on
 `/resume`, and neither is the end of anything: the Claude Code session id survives both,
 the terminal is still open, and the user still expects to hear from it. Marking the row

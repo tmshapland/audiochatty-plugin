@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Drive a running wrapper by hand, for the checks a person has to make.
 
-`wrapper_return_path_plan.md` Phase 1 and Phase 7 both end in a human confirming things the
-test suite cannot: that a wrapped session feels like a normal one, that Claude Code's own
-prompt treats an injected paste as one message, that an instruction sent mid-turn is queued.
-Those need a real session with a real person in it, and then they need these three requests.
+Some things only a human can confirm: that a wrapped session feels like a normal one, that
+Claude Code's own prompt treats an injected paste as one message, that an instruction sent
+mid-turn is queued. Those need a real session with a real person in it, and then they need
+these three requests.
 
     python3 wrapper/devcheck.py show
     python3 wrapper/devcheck.py bind
@@ -12,8 +12,8 @@ Those need a real session with a real person in it, and then they need these thr
     python3 wrapper/devcheck.py unbind
 
 **This is a hand tool, not part of the product.** `/audiochatty-connect` is what really binds a
-session (Phase 3); this stands in for it while that does not exist yet. It talks to the wrapper
-the same way, over the frozen local API in `__main__.py`.
+session; this stands in for it. It talks to the wrapper the same way, over the frozen local
+API in `__main__.py`.
 
 It refuses to guess when more than one wrapper is running — pass `--port` to pick one.
 """
@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
             "agent_session_id": "devcheck-manual",
             # The wrapper refuses a session it did not start, so this has to be its own.
             "claude_session_id": record.get("expected_session_id") or "devcheck-session",
-            # Unreachable unless you ask for something else. Phase 2's poller starts at the
+            # Unreachable unless you ask for something else. The poller starts at the
             # bind, so a real URL here means a hand test talking to production — pass
             # `--backend-url` deliberately when that is what you want.
             "backend_url": args.backend_url or "http://127.0.0.1:1",

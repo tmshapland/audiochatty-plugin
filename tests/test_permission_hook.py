@@ -1,9 +1,9 @@
-"""The blocking hook — `voice_approval_plan.md` Phase 3.
+"""The blocking hook.
 
 Everything else in this plugin is tested for *not* making the terminal wait. This one is
 tested for the opposite, and for the thing that makes the opposite safe.
 
-**The centre of this file is D3: every failure falls through.** Hold expired, backend
+**The centre of this file is that every failure falls through.** Hold expired, backend
 unreachable, session not bound, answer unparseable — each must produce exit 0 and an
 *empty stdout*, because empty stdout is what makes Claude Code show its own dialog. There
 is no third outcome available to a hook that has failed: printing `deny` would silently
@@ -45,8 +45,8 @@ class PermissionTestCase(HookTestCase):
 
     def permission_payload(self, **overrides) -> dict:
         """A recorded `PermissionRequest` input. Note what is *not* in it: `tool_use_id`.
-        Phase 0 found it absent from the live payload despite the published field list, so
-        the fixture matches what actually arrives and `prompt_id` is the correlation key.
+        It is absent from the live payload despite the published field list, so the fixture
+        matches what actually arrives and `prompt_id` is the correlation key.
         """
         payload = {
             "session_id": "sess-1",
@@ -127,7 +127,7 @@ class TestDecides(PermissionTestCase):
         self.assertEqual(posted["kind"], "permission")
         self.assertEqual(posted["tool_name"], "Bash")
         self.assertEqual(posted["claude_session_id"], "sess-1")
-        # `prompt_id`, not `tool_use_id` — Phase 0.
+        # `prompt_id`, not `tool_use_id`.
         self.assertEqual(posted["prompt_id"], "550e8400-e29b-41d4-a716-446655440000")
         self.assertIn("rm -rf build/", posted["prompt_text"])
         self.assertIn("Clear the build dir", posted["prompt_text"])
@@ -152,7 +152,7 @@ class TestDecides(PermissionTestCase):
         self.assertEqual(self.backend.requests_to("/agent/question/:id/expire"), [])
 
     def test_a_multi_choice_question_is_answered_without_the_picker(self):
-        """Phase 5's headline, end to end: no picker, and the model proceeds as though the
+        """The headline, end to end: no picker, and the model proceeds as though the
         option had been chosen at the keyboard."""
         self.register("sess-1")
         self.answer_with("opt-1")
@@ -232,7 +232,7 @@ class TestDecides(PermissionTestCase):
         self.assertLess(len(prompt), permission_hook.MAX_SUMMARY_CHARS + 40)
 
 
-# -- D3: every failure falls through -----------------------------------------------------
+# -- every failure falls through ---------------------------------------------------------
 
 
 class TestFallsThrough(PermissionTestCase):
@@ -298,7 +298,7 @@ class TestFallsThrough(PermissionTestCase):
         self.assertEqual(self.backend.requests_to("/agent/question/:id"), [])
 
     def test_an_expired_hold_falls_through_and_stops_offering_the_question(self):
-        """Nobody called in. D8's accepted limitation, and the one thing the hook still
+        """Nobody called in. An accepted limitation, and the one thing the hook still
         owes the inbox on its way out."""
         self.register("sess-1")
 
@@ -308,7 +308,7 @@ class TestFallsThrough(PermissionTestCase):
         self.assertEqual(len(self.backend.requests_to("/agent/question/:id/expire")), 1)
 
     def test_an_unparseable_answer_falls_through(self):
-        """D4, from the other end. An option id nobody offered is not interpreted, not
+        """From the other end: an option id nobody offered is not interpreted, not
         guessed at, and above all not treated as consent."""
         self.register("sess-1")
         for bogus in ("yes", "ALLOW", "", None, 7, {"behavior": "allow"}):
@@ -442,7 +442,7 @@ class TestDecide(unittest.TestCase):
         self.assertIsNone(self.decide(hook, "allow"))
 
 
-# -- Phase 5: multi-choice and plan approvals --------------------------------------------
+# -- multi-choice and plan approvals -----------------------------------------------------
 
 
 CHOICE_INPUT = {
@@ -489,7 +489,7 @@ class TestChoiceShaping(unittest.TestCase):
         self.assertEqual(asks[1]["question"], "Deploy today?")
 
     def test_a_multiselect_question_is_not_attempted(self):
-        """An answer is one option id (D4) and there is no way to say "these two" in that
+        """An answer is one option id and there is no way to say "these two" in that
         vocabulary. Guessing at a single pick would answer a different question."""
         payload = json.loads(json.dumps(CHOICE_INPUT))
         payload["questions"][0]["multiSelect"] = True
@@ -511,7 +511,7 @@ class TestChoiceShaping(unittest.TestCase):
 
 class TestChoiceDecision(unittest.TestCase):
     def test_a_choice_allows_the_call_with_the_answer_written_in(self):
-        """D9, and the reason the picker never renders."""
+        """The reason the picker never renders."""
         hook = {"tool_name": "AskUserQuestion", "tool_input": CHOICE_INPUT}
         asks = permission_hook.build_asks(hook)
 
@@ -552,7 +552,7 @@ class TestChoiceDecision(unittest.TestCase):
 
 
 class TestPlanSummary(unittest.TestCase):
-    """`tool_input.plan` was 5,000+ characters in Phase 0's sample. What goes over the
+    """`tool_input.plan` was 5,000+ characters in a real sample. What goes over the
     phone is enough to recognise *which* plan and how big it is; the plan itself is on the
     screen the person can look at."""
 

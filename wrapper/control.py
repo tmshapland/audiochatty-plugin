@@ -1,8 +1,5 @@
 """The local control port. HTTP plumbing only — every decision is in `store.WrapperState`.
 
-`wrapper_return_path_plan.md` Phase 1 · W3. Ported from `startRendezvousServer`
-(`channel/server.ts:905`).
-
 **Loopback only, on an ephemeral port.** The rendezvous file is how anyone finds it, so
 there is no fixed number to collide with when fifteen of these are running, and nothing
 outside this machine can reach it whatever the network thinks it is doing.

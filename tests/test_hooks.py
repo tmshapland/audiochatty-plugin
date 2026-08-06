@@ -1,6 +1,6 @@
 """The two hooks, fed recorded hook JSON on stdin — no Claude Code required.
 
-The three things worth breaking here are the three the plan singles out: the marker check
+The three things worth breaking here are the three that matter most: the marker check
 (without it every terminal on the machine starts talking), the `SessionEnd` reason branch
 (without it `/clear` silently kills a live registration), and the silent-failure path
 (without it a backend outage is felt in somebody's terminal). Each has its own class.
@@ -565,13 +565,13 @@ class TestSessionEndReasons(HookTestCase):
                 self.assertNotIn("Traceback", result.stderr)
 
 
-# -- SessionStart: the half of W13 the wrapper can't do itself ---------------------------
+# -- SessionStart: the half the wrapper can't do itself ----------------------------------
 
 
 class TestSessionStartConnects(HookTestCase):
-    """Phase 6.5 · W13. `audiochatty run` connects the session it started, because it minted
-    that session's id. This hook exists for the one case it can't: `--resume`, `--continue`,
-    or an explicit `--session-id`, where the id is the user's and only the session knows it.
+    """`audiochatty run` connects the session it started, because it minted that session's
+    id. This hook exists for the one case it can't: `--resume`, `--continue`, or an explicit
+    `--session-id`, where the id is the user's and only the session knows it.
 
     **The two halves are disjoint by construction** — this hook stands down whenever the
     rendezvous file carries an `expected_session_id` — so they can never race to register the
@@ -665,7 +665,7 @@ class TestSessionStartConnects(HookTestCase):
         self.assertEqual(self.backend.requests_to("/agent/session"), [])
 
     def test_a_disconnected_session_is_not_reconnected(self):
-        """W13's sharpest edge, and the reason the tombstone exists. `/clear` fires this hook
+        """The sharpest edge, and the reason the tombstone exists. `/clear` fires this hook
         again in the same session, so without it a user who deliberately went quiet would be
         reconnected a minute later by a hook they never ran."""
         (self.home / "disconnected").mkdir(parents=True, exist_ok=True)
@@ -682,7 +682,7 @@ class TestSessionStartConnects(HookTestCase):
 
     def test_a_forked_session_is_refused_like_a_nested_one(self):
         """A fork gets a new session id and inherits the wrapper's environment. Binding it
-        would aim spoken instructions at the original session's terminal — the same W3
+        would aim spoken instructions at the original session's terminal — the same
         refusal, for the same reason."""
         self.wrapper.write(expected_session_id="the-original-session")
 

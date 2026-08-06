@@ -1,8 +1,5 @@
 """The wrapper's state: what is on disk, and what `/bind` does to it.
 
-`wrapper_return_path_plan.md` Phase 1 · W3, W8. Ported from `channel/server.ts:116`,
-`:180`, `:338`, `:768`, `:878`, `:925`.
-
 Two things live here rather than in `control.py`, on purpose. The rendezvous file is the
 only state a wrapper keeps, and the bind/unbind rules are the only decisions it makes;
 `control.py` is then nothing but HTTP plumbing, and these rules can be tested without
@@ -138,8 +135,8 @@ class WrapperState:
     ):
         self._lock = threading.RLock()
         self._injector = injector
-        # Phase 2. The dependency goes this way — bind rules start the poll loop, and the
-        # poller knows nothing about rendezvous files — so `poller.py` can import from here
+        # The dependency goes this way — bind rules start the poll loop, and the poller
+        # knows nothing about rendezvous files — so `poller.py` can import from here
         # without a cycle.
         self._poller = poller
         self._cleaned = False
@@ -163,7 +160,7 @@ class WrapperState:
             "backend_url": None,
             "bound_at": None,
             "verified_at": None,
-            # W13. Connecting happens at launch and prints nothing — stdout is the child's
+            # Connecting happens at launch and prints nothing — stdout is the child's
             # screen — so a *failed* connect would otherwise vanish without trace. These two
             # are where the reason goes, and `/audiochatty-status` is what reads them out.
             "connect_error": None,
@@ -177,9 +174,9 @@ class WrapperState:
         with self._lock:
             self._record.update(patch)
             if self._cleaned:
-                # W13 made this reachable. The connect runs on a background thread, so a
-                # wrapper that exits while it is still in flight can have a write land
-                # *after* `cleanup()` unlinked the file — recreating a rendezvous file for a
+                # The connect runs on a background thread, so a wrapper that exits while it
+                # is still in flight can have a write land *after* `cleanup()` unlinked the
+                # file — recreating a rendezvous file for a
                 # process that no longer exists, which is the one thing `cleanup` exists to
                 # prevent. Readers skip dead pids and the next launch prunes it, so the cost
                 # was small; the guard is smaller.
@@ -207,7 +204,7 @@ class WrapperState:
             pass
 
     def record_connect_error(self, error: str) -> None:
-        """W13. The launch tried to connect and couldn't; leave the reason where
+        """The launch tried to connect and couldn't; leave the reason where
         `/audiochatty-status` will find it.
 
         Only the machine-readable code is stored. The sentence a user reads belongs with the
@@ -228,8 +225,7 @@ class WrapperState:
     def bind(self, body: dict) -> tuple[int, dict]:
         """`POST /bind` — the only way this wrapper starts doing anything.
 
-        Ported from `handleBind` (`channel/server.ts:768`) with the handshake probe removed
-        (W8) and one check added (W3, `session_mismatch`).
+        No handshake probe, and one check added: the `session_mismatch` refusal below.
         """
         agent_session_id = str(body.get("agent_session_id") or "").strip()
         claude_session_id = str(body.get("claude_session_id") or "").strip()
@@ -239,7 +235,7 @@ class WrapperState:
         # Optional, and absent means "no". See the note in `Poller.start`: the caller is
         # telling us whether it has already posted `/agent/session/verified` itself, and if
         # it has not — or does not say — the poll loop keeps trying until the backend
-        # confirms. Phase 3's `cmd_connect` is the only caller that will set it.
+        # confirms. `cmd_connect` is the only caller that will set it.
         verified_reported = bool(body.get("verified_reported"))
 
         if not (agent_session_id and claude_session_id and backend_url and token):
@@ -256,7 +252,7 @@ class WrapperState:
         with self._lock:
             expected = self._record.get("expected_session_id")
             if expected and claude_session_id != expected:
-                # W3. Not the session this wrapper started — almost certainly a plain
+                # Not the session this wrapper started — almost certainly a plain
                 # `claude` run inside a wrapped one, which inherited our port from the
                 # environment. Binding it would aim someone's spoken instructions at a
                 # terminal they cannot see.
@@ -285,7 +281,7 @@ class WrapperState:
                 # The *same* session binding again is not that: it is
                 # `/audiochatty-connect` run twice in the same terminal, or run again after
                 # re-pairing, in which case the token it carries is newer than the one in
-                # memory. Refresh in place and say so. The delivered ledger (Phase 2) is
+                # memory. Refresh in place and say so. The delivered ledger is
                 # untouched — same session, same conversation.
                 self.binding.update(
                     agent_session_id=agent_session_id,
@@ -320,7 +316,7 @@ class WrapperState:
             }
             self.generation += 1
             stamp = now_iso()
-            # W8: `verified` is set here, with no handshake and no round trip. The old
+            # `verified` is set here, with no handshake and no round trip. The old
             # plugin could not tell whether its notifications were honoured, so it had to
             # prove reachability by sending a nonce and waiting for it to come back. This
             # process owns the pty. Binding *is* the proof.
@@ -335,8 +331,8 @@ class WrapperState:
                 session_name=session_name or None,
                 backend_url=backend_url,
             )
-            # Phase 2, W-note in `Poller._loop`: polling starts here, at the bind, and no
-            # longer waits for a handshake to prove the session can be reached.
+            # As the note in `Poller._loop` explains: polling starts here, at the bind, and
+            # no longer waits for a handshake to prove the session can be reached.
             if self._poller is not None:
                 self._poller.start(self.binding, self.generation)
             debug(f"bound to session {claude_session_id}")
@@ -351,7 +347,7 @@ class WrapperState:
     def unbind(self, body: dict) -> tuple[int, dict]:
         """`POST /unbind` — `/audiochatty-disconnect`'s half of the same handshake.
 
-        Bumping the generation is what stops a Phase 2 poll loop that is currently asleep
+        Bumping the generation is what stops a poll loop that is currently asleep
         inside a 30s wait: it wakes, sees a number that is not its own, and exits.
         """
         stored = device_token()
@@ -406,9 +402,9 @@ class WrapperState:
 
     def inject(self, body: dict) -> tuple[int, dict]:
         """`POST /inject` — hand text to the injector, which types it into the pty once the
-        user has stopped typing (W6).
+        user has stopped typing.
 
-        Not in the plan's three-endpoint list; see the deviation note in `__main__.py`. The
+        A fourth endpoint beyond the core three; see the note in `__main__.py`. The
         token check is the whole of the security here, and `not_bound` keeps the "an
         unbound wrapper does nothing at all" property the old channel had.
         """

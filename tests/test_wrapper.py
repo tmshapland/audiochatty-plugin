@@ -1,9 +1,8 @@
 """`audiochatty run`, driven the way a person drives it.
 
-`wrapper_return_path_plan.md` Phase 1. The successor to `tests/test_channel.py`, which
-Phase 4 deleted along with the channel it drove — everything that file asserted about
-behaviour the wrapper still has is asserted here instead, and Phase 4's as-built note in
-the plan is the map from one to the other.
+The successor to `tests/test_channel.py`, which was deleted along with the channel it drove
+— everything that file asserted about behaviour the wrapper still has is asserted here
+instead.
 
 Every test here starts the **real wrapper as a subprocess**, with a **real pty for its own
 stdin** and a **fake `claude`** inside it, and asserts on bytes that actually reached that
@@ -19,8 +18,8 @@ three processes and two ptys, and the failures worth catching all live in the wi
   Claude Code's TUI raw-modes its terminal; so does `FakeClaude`.
 
 The one thing these tests cannot cover is whether Claude Code's *interface* interprets a
-bracketed paste the way a terminal emulator's would. That is Phase 0's W5 spike and needs a
-human at a keyboard; see `wrapper/README.md`.
+bracketed paste the way a terminal emulator's would. That needs a human at a keyboard; see
+`wrapper/README.md`.
 """
 
 from __future__ import annotations
@@ -56,8 +55,8 @@ TOKEN = "device-token-for-tests"
 # not the same measurement.
 QUIET_PERIOD = 0.6
 
-# Phase 2's cadences, compressed. The real numbers are 5s / 30s / 60s and a suite that used
-# them would take twenty minutes; what the tests actually assert on is the *shape* — that a
+# The poller's cadences, compressed. The real numbers are 5s / 30s / 60s and a suite that
+# used them would take twenty minutes; what the tests actually assert on is the *shape* — that a
 # failure backs off far longer than a success, that an empty answer is cheap, that nothing
 # spins. See `poller._tunable`.
 POLL = {
@@ -126,7 +125,8 @@ class WrappedSession:
     """A live `audiochatty run` with a fake `claude` in it.
 
     `stdin_master` is the far end of the wrapper's own terminal — writing to it is the test
-    typing on the keyboard, which is the only honest way to exercise W6.
+    typing on the keyboard, which is the only honest way to exercise the never-type-over-
+    the-user behaviour.
     """
 
     def __init__(self, home: Path, *, exit_code: int = 0, quiet_period: float = QUIET_PERIOD,
@@ -149,7 +149,7 @@ class WrappedSession:
             AUDIOCHATTY_HOME=str(home),
             FAKE_CLAUDE_LOG=str(self.log),
             FAKE_CLAUDE_EXIT=str(exit_code),
-            # **Never left unset.** Since W13 the wrapper connects itself at launch, and
+            # **Never left unset.** The wrapper connects itself at launch, and
             # `audiochat.backend_url()` falls back to the *deployed* backend when nothing
             # says otherwise — so an unset value here would have this suite registering
             # sessions against production. Unreachable by default, for the same reason
@@ -376,14 +376,14 @@ class TestRendezvous(WrapperTestCase):
         self.assertTrue(record["expected_session_id"])
 
         # 0600, in a 0700 directory, and the token is not in here. (The directory mode came
-        # over from `test_channel.py` in Phase 4: the ledgers live beside these files, and
+        # over from `test_channel.py`: the ledgers live beside these files, and
         # the whole point of the token check is that neither is worth reading.)
         self.assertEqual(session.rendezvous.stat().st_mode & 0o777, 0o600)
         self.assertEqual(session.rendezvous.parent.stat().st_mode & 0o777, 0o700)
         self.assertNotIn(TOKEN, session.rendezvous.read_text())
 
     def test_wrapper_env_reaches_the_child(self):
-        """W3 in one assertion: the child's environment carries the port and pid, which is
+        """In one assertion: the child's environment carries the port and pid, which is
         the whole of how `/audiochatty-connect` finds its wrapper."""
         session = self.start()
         environ = Path(f"/proc/{session.record['child_pid']}/environ")
@@ -460,7 +460,7 @@ class TestBind(WrapperTestCase):
         self.assertNotIn("token", json.dumps(body))
 
     def test_bind_marks_verified_immediately(self):
-        """W8: there is no handshake any more. The wrapper owns the pty, so binding *is* the
+        """There is no handshake any more. The wrapper owns the pty, so binding *is* the
         proof that the session can be reached."""
         session = self.start()
         status, body = session.bind()
@@ -486,7 +486,7 @@ class TestBind(WrapperTestCase):
         self.assertFalse(session.reread()["bound"])
 
     def test_bind_refuses_a_session_this_wrapper_did_not_start(self):
-        """W3's safety check. Without it, a plain `claude` run inside a wrapped session
+        """The safety check. Without it, a plain `claude` run inside a wrapped session
         inherits our port and can point someone's spoken instructions at a terminal they
         cannot see."""
         session = self.start()
@@ -530,7 +530,7 @@ class TestBind(WrapperTestCase):
         self.assertFalse(record["bound"])
         self.assertFalse(record["verified"])
         self.assertIsNone(record["claude_session_id"])
-        # The generation moved, which is what stops a Phase 2 poll loop mid-sleep.
+        # The generation moved, which is what stops a poll loop mid-sleep.
         self.assertEqual(record["generation"], 2)
 
     def test_unbind_refuses_a_bad_token(self):
@@ -563,7 +563,7 @@ class TestInjection(WrapperTestCase):
         self.assertEqual((status, body["error"]), (403, "token_mismatch"))
 
     def test_multi_line_text_arrives_as_one_paste(self):
-        """W5. The failure this prevents: Claude Code submitting at the first newline and
+        """The failure this prevents: Claude Code submitting at the first newline and
         treating the rest of a spoken instruction as a second prompt."""
         session = self.start()
         session.bind()
@@ -593,7 +593,7 @@ class TestInjection(WrapperTestCase):
         self.assertNotIn(b"\x1b[2J", saw)
 
     def test_the_quiet_period_holds_an_injection_back_while_you_are_typing(self):
-        """W6, the whole point of the wrapper over `tmux send-keys`: it can see the keyboard,
+        """The whole point of the wrapper over `tmux send-keys`: it can see the keyboard,
         so it can wait for a pause instead of splicing into a half-written line."""
         session = self.start()
         session.bind()
@@ -640,11 +640,11 @@ class TestInjection(WrapperTestCase):
 
 
 class TestDelivery(WrapperTestCase):
-    """Phase 2: a message sitting in the backend queue ends up typed into the session.
+    """A message sitting in the backend queue ends up typed into the session.
 
     Every test here runs the real poll loop against `tests/stub_backend.py` — the same stub
-    the old channel's tests used, speaking the same three routes, which is W10 demonstrated
-    rather than asserted: nothing about the queue changed when the delivery mechanism did.
+    the old channel's tests used, speaking the same three routes, which demonstrates that
+    nothing about the queue changed when the delivery mechanism did.
     """
 
     def test_a_queued_message_is_typed_once_and_acked_once(self):
@@ -672,7 +672,7 @@ class TestDelivery(WrapperTestCase):
             self.assertEqual(len(backend.requests_to("/agent/inbound/ack")), 1)
 
     def test_the_ledger_is_written_before_the_ack(self):
-        """W9's order, from the outside: the file that prevents a duplicate exists by the
+        """The order, from the outside: the file that prevents a duplicate exists by the
         time the backend is told anything."""
         with StubBackend() as backend:
             backend.reply("/agent/inbound", 200, one_message())
@@ -686,7 +686,7 @@ class TestDelivery(WrapperTestCase):
             self.assertEqual(ledger.stat().st_mode & 0o777, 0o600)
 
     def test_a_multi_line_message_arrives_as_a_single_paste(self):
-        """W5 on the path that matters: not `/inject` by hand, but a message that came off
+        """On the path that matters: not `/inject` by hand, but a message that came off
         the backend queue the way a spoken instruction really does."""
         with StubBackend() as backend:
             backend.reply(
@@ -725,7 +725,7 @@ class TestDelivery(WrapperTestCase):
             self.assertEqual(session.child_saw().count(b"\x1b[200~"), 1)
 
     def test_no_duplicate_across_a_restart(self):
-        """W9's actual requirement. The ledger is keyed by Claude Code session rather than
+        """The actual requirement. The ledger is keyed by Claude Code session rather than
         by pid precisely so that it is *not* empty here, which is the one moment it matters.
         """
         with StubBackend() as backend:
@@ -787,13 +787,12 @@ class TestDelivery(WrapperTestCase):
         self.assertTrue(wait_for(lambda: b"still typing" in session.child_saw()))
 
     def test_an_unpaired_wrapper_makes_no_network_calls(self):
-        """The "costs nothing until connected" property, in the one place W13 left it.
+        """The "costs nothing until connected" property, in the one place it survives.
 
-        It used to hold for every unbound wrapper, and Phase 2 measured it. Phase 6.5 spends
-        it knowingly: a paired machine now registers at launch (`TestConnectOnLaunch`). What
-        survives — and what this pins — is that an *unpaired* machine still does nothing at
-        all, so `audiochatty run` before the machine is paired is indistinguishable from
-        plain `claude`.
+        It used to hold for every unbound wrapper. It is spent knowingly now: a paired
+        machine registers at launch (`TestConnectOnLaunch`). What survives — and what this
+        pins — is that an *unpaired* machine still does nothing at all, so `audiochatty run`
+        before the machine is paired is indistinguishable from plain `claude`.
         """
         (self.home / "credentials.json").unlink()
         with StubBackend() as backend:
@@ -830,9 +829,9 @@ class TestDelivery(WrapperTestCase):
             self.assertEqual(len(backend.requests_to("/agent/inbound")), settled)
 
     def test_verification_is_reported_and_retried_until_it_lands(self):
-        """W8's loose end. The phone-side inbox reads `channel_verified_at` directly, so a
-        reachable session the backend never heard about is one the user is wrongly told they
-        cannot talk to."""
+        """The verification loose end. The phone-side inbox reads `channel_verified_at`
+        directly, so a reachable session the backend never heard about is one the user is
+        wrongly told they cannot talk to."""
         with StubBackend() as backend:
             backend.reply("/agent/session/verified", 500, {"error": "nope"})
             session = self.start()
@@ -873,9 +872,9 @@ class TestDelivery(WrapperTestCase):
             self.assertEqual(acks[0]["body"]["message_ids"], [MSG_ID])
 
     def test_the_quiet_period_still_applies_to_a_message_off_the_queue(self):
-        """W6 and W9 together, which is the interaction the port had to get right: the ack
-        follows the *typing*, not the fetching, so a message held back because the user is
-        mid-sentence is not yet marked delivered anywhere."""
+        """The quiet period and the ledger together, which is the interaction the port had to
+        get right: the ack follows the *typing*, not the fetching, so a message held back
+        because the user is mid-sentence is not yet marked delivered anywhere."""
         with StubBackend() as backend:
             backend.reply("/agent/inbound", 200, one_message("spoken while you were typing"))
             session = self.start(quiet_period=2.0)
@@ -897,8 +896,8 @@ class TestDelivery(WrapperTestCase):
 
 
 class TestConnectOnLaunch(WrapperTestCase):
-    """Phase 6.5 · W13. `audiochatty run` is the whole of the setup: the wrapper registers
-    its own session and binds itself, so nothing has to be typed into the session.
+    """`audiochatty run` is the whole of the setup: the wrapper registers its own session
+    and binds itself, so nothing has to be typed into the session.
 
     Every test here starts a *real* wrapper against a stub backend and asserts on what the
     backend received, because the thing worth breaking is the wiring — a connect that runs on
@@ -959,7 +958,8 @@ class TestConnectOnLaunch(WrapperTestCase):
 
     def test_the_name_can_be_chosen_at_launch(self):
         """`--name` replaces the argument `/audiochatty-connect [name]` used to take. Without
-        it W13 would silently remove the ability to name a session at all."""
+        it, moving the connect to launch would silently remove the ability to name a session
+        at all."""
         with StubBackend() as backend:
             self.start(backend=backend.url, extra_args=["--name", "auth-bug"])
 
@@ -993,7 +993,7 @@ class TestConnectOnLaunch(WrapperTestCase):
 
         self.assertTrue(
             wait_for(lambda: session.reread().get("connect_error"), timeout=10),
-            "a silent failure with nothing written down is the one outcome W13 forbids",
+            "a silent failure with nothing written down is the one outcome forbidden here",
         )
         self.assertEqual(session.record["connect_error"], "unreachable")
         self.assertTrue(session.record["connect_error_at"])
@@ -1027,8 +1027,8 @@ class TestConnectOnLaunch(WrapperTestCase):
             self.assertIsNone(session.reread().get("connect_error"))
 
     def test_the_launch_says_nothing_on_the_users_screen(self):
-        """👤 confirmed the silence (2026-07-29). It is also a hard constraint: stdout is the
-        child's screen and a stray line there is a corrupted TUI."""
+        """The silence is a hard constraint: stdout is the child's screen and a stray line
+        there is a corrupted TUI."""
         with StubBackend() as backend:
             session = self.start(backend=backend.url)
             self.assertTrue(wait_for(lambda: session.reread().get("bound"), timeout=10))

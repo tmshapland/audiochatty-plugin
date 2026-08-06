@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """The audiochatty plugin's whole client — shared library and CLI in one file.
 
-`coding_agent_build_plan.md` Phase 5 · `coding_agent_summary_plan.md` §5.
-
 **Stdlib only.** `urllib` and `json`, no pip, no venv, no build step. That constraint is
-what makes "read the repo, then install it" an honest offer (§5), and it is easy to break
+what makes "read the repo, then install it" an honest offer, and it is easy to break
 with one convenient import. There is nothing to add here that is worth a dependency.
 
 Five subcommands, one per slash command, plus the three hook scripts that import this
@@ -22,7 +20,7 @@ code. The mechanism is unchanged; what changed is that the user can now tell the
 apart by name instead of being told to run the same command again and hope it did something
 different.
 
-**`connect` is no longer a step in the happy path** (`wrapper_return_path_plan.md` W13).
+**`connect` is no longer a step in the happy path.**
 `audiochatty run` connects the session it starts, and `scripts/session_start_hook.py`
 connects the ones it could not name up front. The subcommand stays for repair — retry,
 rename, reconnect — and the protocol all three share is `connect_session` below.
@@ -34,11 +32,10 @@ directory of tombstones for sessions the user closed by hand, a `wrappers/` dire
 `pending.json` holding the `device_code`. Nothing else.
 
 **There is one long-lived process now, it is not this one, and it is not inside the
-session.** The return path is `wrapper/` — the process `audiochatty run` is
-(`wrapper_return_path_plan.md` W1). It started this `claude` on a pty and can type into it,
-it connects itself once the session exists, and everything this file does about it is in
-"the wrapper" section below. This script itself is still what it was — short-lived, one
-job, then gone.
+session.** The return path is `wrapper/` — the process `audiochatty run` is. It started
+this `claude` on a pty and can type into it, it connects itself once the session exists,
+and everything this file does about it is in "the wrapper" section below. This script
+itself is still what it was — short-lived, one job, then gone.
 
 **The token is never printed and never taken as an argument.** Anything typed into a
 Claude Code prompt lands in the session `.jsonl` and in the model's context, and anything
@@ -72,10 +69,10 @@ CLI_TIMEOUT = 10.0
 #
 # Raised from 2.5s when the turn payload grew to carry the full transcript, but only to
 # 4.0 — and the gap between those two numbers is the whole trade. A bigger body wants a
-# longer timeout; the plan's hard requirement (§8, and rule 2 in `stop_hook.py`) is that
-# a backend which is down or asleep never makes the terminal wait, and *that* wins. The
-# tests hold the line at six seconds wall-clock for a hook against a dead backend, which
-# is the number this has to fit under, not the body size.
+# longer timeout; the hard requirement (rule 2 in `stop_hook.py`) is that a backend which
+# is down or asleep never makes the terminal wait, and *that* wins. The tests hold the
+# line at six seconds wall-clock for a hook against a dead backend, which is the number
+# this has to fit under, not the body size.
 #
 # It fits comfortably because gzip did the work instead: a typical turn is ~16 KB on the
 # wire and the largest measured in this repo is 48 KB, where the cost is the handshake
@@ -134,7 +131,7 @@ def marker_path(claude_session_id: str) -> Path:
 
     The file name is the session id, so the Stop hook answers "is *this* session
     registered" with one `os.path.exists` and no parsing. That check is what keeps the
-    other fourteen terminals open that day silent (§8), and it has to be cheap because it
+    other fourteen terminals open that day silent, and it has to be cheap because it
     runs on every turn of every session on the machine.
     """
     sessions = config_dir() / "sessions"
@@ -310,8 +307,8 @@ def _decode(raw: bytes) -> dict:
 
 # -- the circuit breaker on the hook path ----------------------------------------------
 #
-# The plan's hard requirement is that a backend which is down or asleep must never make
-# the terminal wait (§8). A short timeout alone does not deliver that: it makes *every*
+# The hard requirement is that a backend which is down or asleep must never make
+# the terminal wait. A short timeout alone does not deliver that: it makes *every*
 # turn pay the timeout for as long as the outage lasts, and a sleeping Render service is
 # an outage measured in hours.
 #
@@ -391,7 +388,7 @@ def consume_skip_next_turn(claude_session_id: str, marker: dict) -> bool:
     return True
 
 
-# -- the disconnect tombstone (W13) ----------------------------------------------------
+# -- the disconnect tombstone ----------------------------------------------------------
 #
 # `audiochatty run` connects its own session, and a `SessionStart` hook connects the ones
 # it could not name up front (`--resume`). Both are automatic, and automatic reconnection
@@ -438,14 +435,14 @@ def clear_tombstone(claude_session_id: str) -> None:
     tombstone_path(claude_session_id).unlink(missing_ok=True)
 
 
-# -- the wrapper (W1, W3) --------------------------------------------------------------
+# -- the wrapper -----------------------------------------------------------------------
 #
 # The return path is a process that sits *in front of* this session rather than inside it.
 # `audiochatty run` opened a pty, started this `claude` in it, and can type into it — see
 # `wrapper/__main__.py`, whose docstring is the frozen API this section is written against
 # and the only thing it is written against.
 #
-# **Finding it is one environment variable** (W3). The wrapper exports
+# **Finding it is one environment variable.** The wrapper exports
 # `AUDIOCHATTY_WRAPPER_PID` and `AUDIOCHATTY_WRAPPER_PORT` into the environment `claude`
 # inherits, so everything the session runs — this command included — can read them. That
 # replaces ~200 lines here that answered "which session am I?" out of `ps` output, with
@@ -453,7 +450,7 @@ def clear_tombstone(claude_session_id: str) -> None:
 # is inherited rather than deduced, so there is exactly one candidate or none, and the old
 # "found more than one" refusal has nothing left to describe.
 #
-# **What is still worth checking is that the candidate is really ours** (W3). A wrapped
+# **What is still worth checking is that the candidate is really ours.** A wrapped
 # session can run a Bash tool call, and someone can type plain `claude` inside that — an
 # inner session which inherits both variables and is *not* the one the wrapper started.
 # Binding it would aim spoken instructions at the outer terminal. The wrapper minted its
@@ -462,10 +459,10 @@ def clear_tombstone(claude_session_id: str) -> None:
 
 WRAPPER_TIMEOUT = 3.0
 
-# How a session gets a return path. 👤 chose the bare command over an alias-only story
-# (`wrapper_return_path_plan.md` Phase 0, 2026-07-29): "this is for developers, they can do
-# commands." So this is printed flat wherever it appears, and the alias below is the install
-# step that makes it exist rather than a second way to spell it.
+# How a session gets a return path. The bare command is preferred over an alias-only story
+# — this is for developers, who can run commands. So it is printed flat wherever it appears,
+# and the alias below is the install step that makes it exist rather than a second way to
+# spell it.
 RUN_COMMAND = "audiochatty run"
 
 # The launcher shipped in this plugin, for the one line that turns `RUN_COMMAND` into a real
@@ -541,10 +538,10 @@ def find_wrapper(claude_session_id: str) -> tuple[dict | None, str]:
     since exited — and whose pid has since been reused by something else — resolves to
     nothing rather than to the wrong process.
 
-    **`session_mismatch` is W3's refusal and it is a different answer from `none`.** It
-    means a wrapper *was* found and it belongs to another session: the nested-`claude` case
-    in this section's opening comment. Telling that user to run `audiochatty run` would be
-    true and useless — they are already inside one.
+    **`session_mismatch` is a different answer from `none`.** It means a wrapper *was*
+    found and it belongs to another session: the nested-`claude` case in this section's
+    opening comment. Telling that user to run `audiochatty run` would be true and useless
+    — they are already inside one.
     """
     pid_raw = os.environ.get("AUDIOCHATTY_WRAPPER_PID", "").strip()
     port_raw = os.environ.get("AUDIOCHATTY_WRAPPER_PORT", "").strip()
@@ -623,13 +620,13 @@ def unbind_wrapper(wrapper: dict, token: str | None) -> bool:
 
 
 def _print_relaunch(reason: str) -> None:
-    """The one refusal left (W4). The old design had two — no channel, and a channel whose
+    """The one refusal left. The old design had two — no channel, and a channel whose
     events were not honoured — and both meant "relaunch with the flag". There is no flag now,
     so there is one cause and one instruction.
 
-    Rarely reached since W13: connecting is not a step anyone is told to take, so getting
-    here means someone ran this command by hand in a session that has no return path. The
-    instruction is the same, minus the "then run connect again" that is no longer true."""
+    Rarely reached: connecting is not a step anyone is told to take, so getting here means
+    someone ran this command by hand in a session that has no return path. The instruction
+    is the same, minus the "then run connect again" that is no longer true."""
     print(reason)
     print()
     print("Start Claude Code through audiochatty instead:")
@@ -645,8 +642,8 @@ def _print_relaunch(reason: str) -> None:
 
 
 def _print_nested_session() -> None:
-    """W3's refusal. Rare, but the generic advice is actively misleading here — this user
-    did start a wrapped session, and is now in a second one nested inside it."""
+    """The nested-session refusal. Rare, but the generic advice is actively misleading here
+    — this user did start a wrapped session, and is now in a second one nested inside it."""
     print("This isn't the session `audiochatty run` started. It looks like a plain `claude`")
     print("started from inside a wrapped one, which inherited the return path without owning")
     print("it.")
@@ -658,9 +655,8 @@ def _print_nested_session() -> None:
 
 # -- pairing ---------------------------------------------------------------------------
 #
-# The device flow, in two invocations — and since 👤 2026-08-04 the two invocations are two
-# *commands*: `pair-start` mints a code, `pair-finish` redeems it. `pending.json` is what
-# connects them.
+# The device flow, in two invocations — and the two invocations are two *commands*:
+# `pair-start` mints a code, `pair-finish` redeems it. `pending.json` is what connects them.
 #
 # **Why it cannot be one command.** A slash command's `` !`…` `` output is preprocessing:
 # it is substituted into the prompt *after* the command exits, so nothing it prints is
@@ -922,10 +918,10 @@ def _pair_complete(response: dict, base: str) -> int:
     who = response.get("profile_name")
     print(f"Linked to {workspace}" + (f" as {who}." if who else "."))
     print()
-    # R12, and Phase 0's launch decision. Four surfaces describe this setup — two manifest
-    # descriptions, the README, and here — and this is the only one whose words we fully
-    # control and the only one the user is looking at when the step is actually due. So it
-    # carries the command and the reason, not a pointer to somewhere else that carries them.
+    # Four surfaces describe this setup — two manifest descriptions, the README, and here —
+    # and this is the only one whose words we fully control and the only one the user is
+    # looking at when the step is actually due. So it carries the command and the reason,
+    # not a pointer to somewhere else that carries them.
     print("Next, let's create a shortcut command for starting an audiochatty session. Quit Claude Code and add this line to your shell profile (vi ~/.zshrc or vi ~/.bashrc).")
     print()
     print(f'    alias audiochatty="{WRAPPER_LAUNCHER}"')
@@ -936,17 +932,17 @@ def _pair_complete(response: dict, base: str) -> int:
     print("To connect Audiochatty to a Claude Code session, start Claude Code with the shortcut:")
     print(f"    {RUN_COMMAND} --name [name]")
     print()
-    # W13: that command connects the session for you, so there is no third step to name
-    # here. Naming one would send every new user off to do something that does nothing.
+    # That command connects the session for you, so there is no third step to name here.
+    # Naming one would send every new user off to do something that does nothing.
     print("That connects the session for you.")
     return 0
 
 
 # -- connect ---------------------------------------------------------------------------
 #
-# **Three callers now, one protocol** (W13). `audiochatty run` connects the session it
-# started, `scripts/session_start_hook.py` connects the ones the wrapper could not name up
-# front (`--resume`), and `/audiochatty-connect` remains for repair — retry a connect that
+# **Three callers now, one protocol.** `audiochatty run` connects the session it started,
+# `scripts/session_start_hook.py` connects the ones the wrapper could not name up front
+# (`--resume`), and `/audiochatty-connect` remains for repair — retry a connect that
 # failed while the backend was down, rename a session, reconnect one that was disconnected.
 #
 # All three go through `connect_session` below. They differ in exactly two ways: how the
@@ -1009,7 +1005,7 @@ def connect_session(
 
     The order is load-bearing and has not changed since the channel design: `/bind` needs
     the `agent_sessions.id` that registration returns, `/agent/session/verified` states a
-    fact that only becomes true at the bind (W8), and the marker is the Stop hook's gate,
+    fact that only becomes true at the bind, and the marker is the Stop hook's gate,
     which must not open until the rest worked.
 
     `bind` is a one-argument callable taking the `agent_session_id` and raising `ApiError`
@@ -1072,7 +1068,7 @@ def connect_session(
             detail=f"Couldn't connect this session's return path ({exc}).",
         )
 
-    # W8. The bind *is* the proof of reachability, so this states it rather than proving it:
+    # The bind *is* the proof of reachability, so this states it rather than proving it:
     # there is no nonce, no injected handshake, no tool call for the model to answer, and no
     # retry loop here. Failure is not fatal and deliberately not reported — the wrapper
     # retries this from its own poll loop, so the cost of losing the call is that the phone
@@ -1103,9 +1099,9 @@ def connect_session(
 
 
 def cmd_connect(args: argparse.Namespace) -> int:
-    """`/audiochatty-connect` — the repair tool (W13).
+    """`/audiochatty-connect` — the repair tool.
 
-    Deterministic by design (D1): read the session id, find the wrapper, POST, write a
+    Deterministic by design: read the session id, find the wrapper, POST, write a
     marker. Nothing here is a judgment call, which is why it is a slash command and not a
     skill — routing it through the model means it can be paraphrased, skipped, or done
     twice.
@@ -1115,9 +1111,9 @@ def cmd_connect(args: argparse.Namespace) -> int:
     because the backend was down at launch, a rename, and reconnecting a session that was
     deliberately disconnected. All three are worth not having to restart Claude Code for.
 
-    **The wrapper is still checked before anything is registered** (W4, unchanged from R1).
-    Both refusals below are local and cost nothing, and taking them first is what keeps a
-    refused `connect` from leaving a live session row behind.
+    **The wrapper is still checked before anything is registered.** Both refusals below are
+    local and cost nothing, and taking them first is what keeps a refused `connect` from
+    leaving a live session row behind.
     """
     token = device_token()
     if not token:
@@ -1189,7 +1185,7 @@ def cmd_connect(args: argparse.Namespace) -> int:
         print("This session is not registered.")
         return 1
 
-    # An explicit reconnect is the one thing that overrides a `disconnect` (W13): the user
+    # An explicit reconnect is the one thing that overrides a `disconnect`: the user
     # is asking for it by name, where a hook firing after a `/clear` is not.
     clear_tombstone(claude_session_id)
     print(f'This session is now "{result.name}" in audiochatty.')
@@ -1252,12 +1248,12 @@ def _print_wrapper_status(claude_session_id: str, *, registered: bool) -> None:
     This is the command a confused user runs, so it names the *cause* where it can tell.
     There is one fewer cause to name than there used to be: the old "connected but
     unconfirmed because no flag was passed" case cannot happen, since verification is now
-    set at bind time rather than proven on a later turn (W8).
+    set at bind time rather than proven on a later turn.
 
-    **After W13 this command carries more weight than it used to.** Connecting happens at
-    launch and prints nothing, so success and failure look identical in the terminal — this
-    is the only place a failed connect surfaces at all. The wrapper writes why it failed
-    into its rendezvous file precisely so this function can say it out loud.
+    **This command carries a lot of weight.** Connecting happens at launch and prints
+    nothing, so success and failure look identical in the terminal — this is the only place
+    a failed connect surfaces at all. The wrapper writes why it failed into its rendezvous
+    file precisely so this function can say it out loud.
     """
     wrapper, problem = find_wrapper(claude_session_id)
 
@@ -1272,7 +1268,7 @@ def _print_wrapper_status(claude_session_id: str, *, registered: bool) -> None:
         print(f"    {RUN_COMMAND}")
         return
 
-    # W13: the launch tried to connect and failed, silently, because there is nowhere on a
+    # The launch tried to connect and failed, silently, because there is nowhere on a
     # TUI's screen for it to have said so. This is where that reason comes out.
     connect_error = str(wrapper.get("connect_error") or "")
     if connect_error and not registered:
@@ -1370,12 +1366,12 @@ def cmd_disconnect(args: argparse.Namespace) -> int:
     stays bound keeps polling for instructions addressed to a session the user has just
     closed, and would type one into this terminal.
 
-    **The tombstone is third, and it is what makes this stick** (W13). Connecting is
-    automatic now, and `SessionStart` fires again on `/clear` in the same session — so
-    without a record that the user closed this one, a `/clear` a minute later would quietly
-    reconnect it. Written after the local teardown because it is the least urgent part: its
-    absence costs stickiness across a later `/clear`, while a marker left in place would
-    keep sending turns right now.
+    **The tombstone is third, and it is what makes this stick.** Connecting is automatic
+    now, and `SessionStart` fires again on `/clear` in the same session — so without a
+    record that the user closed this one, a `/clear` a minute later would quietly reconnect
+    it. Written after the local teardown because it is the least urgent part: its absence
+    costs stickiness across a later `/clear`, while a marker left in place would keep sending
+    turns right now.
     """
     claude_session_id = args.session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not claude_session_id:
@@ -1436,7 +1432,7 @@ def _end_session_quietly(claude_session_id: str, token: str, base: str | None,
 
 def _mark_verified_quietly(claude_session_id: str, token: str, base: str | None,
                            timeout: float = CLI_TIMEOUT) -> bool:
-    """`POST /agent/session/verified` — the whole of W8, in one call that may fail.
+    """`POST /agent/session/verified`, in one call that may fail.
 
     The inbox reads `agent_sessions.channel_verified_at` to decide whether the user is
     offered a reply at all, so this is the call that makes a connected session *look*
@@ -1519,15 +1515,15 @@ def post_session_end(claude_session_id: str) -> str:
 
 # -- the question calls the permission hook makes --------------------------------------
 #
-# `voice_approval_plan.md` Phase 3. These three look like the ingest calls above and are
-# governed by a different rule, so the difference is worth stating once here.
+# These three look like the ingest calls above and are governed by a different rule, so the
+# difference is worth stating once here.
 #
 # `post_turn` must never make the terminal wait. `post_question` is called from a hook
-# whose entire job **is** to make the terminal wait (D2) — the session is frozen on
-# purpose while somebody decides by voice. So the timeouts here are per-request, not a
-# budget for the whole exchange, and the hold that spans them lives in the hook.
+# whose entire job **is** to make the terminal wait — the session is frozen on purpose
+# while somebody decides by voice. So the timeouts here are per-request, not a budget for
+# the whole exchange, and the hold that spans them lives in the hook.
 #
-# What does not change is D3: every failure on this path falls through to Claude Code's
+# What does not change is that every failure on this path falls through to Claude Code's
 # own dialog. Never auto-deny, never auto-allow. That is why each of these returns a
 # reason string rather than raising, and why the hook treats every reason that is not a
 # real answer the same way — by saying nothing.

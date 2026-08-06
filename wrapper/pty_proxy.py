@@ -1,12 +1,10 @@
 """The pass-through terminal: a pty, `claude` inside it, and a loop in the middle.
 
-`wrapper_return_path_plan.md` Phase 1 · W1.
-
 The whole design goal is that this file is *invisible*. A wrapped session has to feel
-identical to an unwrapped one — Phase 0's exit criterion is a person using it for an hour
-and not being able to tell — which means every terminal behaviour has to survive the round
-trip: raw keystrokes, Ctrl-C, window resizes, alternate-screen redraws, the child's own
-idea of what mode the terminal is in.
+identical to an unwrapped one — a person should be able to use it for an hour and not be
+able to tell — which means every terminal behaviour has to survive the round trip: raw
+keystrokes, Ctrl-C, window resizes, alternate-screen redraws, the child's own idea of what
+mode the terminal is in.
 
     real terminal ─▶ stdin ─▶ [ this loop ] ─▶ pty master ─▶ pty slave ─▶ claude
     real terminal ◀─ stdout ◀─[ this loop ]◀── pty master ◀───────────────┘
@@ -227,7 +225,7 @@ class PtyProxy:
                         # permanently readable.
                         watching = [fd for fd in watching if fd != stdin_fd]
                     else:
-                        # W6's entire input: the one place that knows the human is typing.
+                        # The one place that knows the human is typing.
                         self.injector.note_keystroke()
                         self._write(self.master_fd, data)
 
