@@ -3,20 +3,26 @@
 Talk to a Claude Code session from wherever you are. When a session you've opted in finishes
 a turn, a short spoken summary of what it did shows up in your
 [audiochatty](https://github.com/tmshapland) inbox. You listen to it, ask follow-up
-questions out loud — and say what to do next, which arrives in that session as a prompt.
+questions out loud — and say what to do next, which arrives in that session as a prompt. And
+when Claude Code stops to ask *you* something — a permission prompt, a multiple-choice
+question, a plan to approve — the terminal freezes and audiochatty asks instead, so the
+decision can come from your phone rather than whoever happens to be at the keyboard.
 
 ```
 you, away from your desk                  this laptop
 ─────────────────────────                 ────────────────────────────────────────
-  hear what it did       ◀── audiochatty ◀── scripts/stop_hook.py ◀─ the turn it just finished
-  say what to do next    ──▶ audiochatty ──▶ audiochatty run     ──▶ typed into your session
+  hear what it did       ◀── audiochatty ◀── scripts/stop_hook.py       ◀─ the turn it just finished
+  say what to do next    ──▶ audiochatty ──▶ audiochatty run           ──▶ typed into your session
+  decide, out loud       ◀─▶ audiochatty ◀─▶ scripts/permission_hook.py ◀─▶ a blocked permission prompt
 ```
 
-Both halves are opt-in per session, and both stop when you disconnect. The second half is
+All three are opt-in per session, and all three stop when you disconnect. The second row is
 the one to read carefully: **what you say into audiochatty is typed into a coding agent that
 edits files and runs commands on this machine.** It is exactly as powerful as typing the same
 words into the terminal yourself, which is the point, and it is worth knowing before you
-connect a session.
+connect a session. The third row goes further still — it doesn't type a request, it
+**decides**: allow or deny a tool call, approve or reject a plan, pick one of a handful of
+options, on your say-so and without anyone touching the keyboard.
 
 ---
 
@@ -28,9 +34,10 @@ below is in this repo, in the files it names.
 | | |
 | --- | --- |
 | **Runtime** | Python 3, standard library only. No pip, no venv, no build step, nothing to install beyond the plugin itself. |
-| **Background processes** | One, and you start it yourself: `audiochatty run`, which is how you launch Claude Code once you want a session you can talk to. It runs for as long as that session does, and it connects that session itself — on a paired machine it registers and starts polling at launch. On a machine you haven't paired yet it does nothing at all: no polling, no network. The hooks are still short-lived processes Claude Code spawns, waits on, and discards. |
+| **Background processes** | One, and you start it yourself: `audiochatty run`, which is how you launch Claude Code once you want a session you can talk to. It runs for as long as that session does, and it connects that session itself — on a paired machine it registers and starts polling at launch. On a machine you haven't paired yet it does nothing at all: no polling, no network. The hooks are still short-lived processes Claude Code spawns, waits on, and discards — all except `PermissionRequest`, which is short-lived in the same sense but not fast on purpose: it can hold the terminal open for up to 10 minutes while a decision comes back by voice. |
 | **What that process can do** | Type into your Claude Code session, as if you had typed it. That is the whole feature and the whole risk; `wrapper/README.md` spells out the limits. |
-| **On disk** | `~/.audiochatty/` (mode 0700): a credentials file (0600) with your device token, one marker file per registered session, one tombstone per session you disconnected by hand, and one rendezvous file (0600) per running wrapper. Nothing else. |
+| **What the blocking hook can do** | Decide a permission prompt, a multiple-choice question, or a plan approval — *in place of* the dialog Claude Code would otherwise show, so it never renders. Every failure (backend unreachable, hold expired, session not connected, an answer that doesn't map to an offered option) falls through to that same dialog in silence; it never auto-allows and never auto-denies. `scripts/permission_hook.py`'s docstring is the detail. |
+| **On disk** | `~/.audiochatty/` (mode 0700): a credentials file (0600) with your device token, one marker file per registered session, one tombstone per session you disconnected by hand, and one rendezvous file (0600) per running wrapper. Nothing else — a pending question lives on the backend, not on this machine. |
 | **Network** | Your audiochatty backend, and nowhere else — POSTs out from `scripts/audiochat.py`, and a poll for anything addressed to this session from `audiochatty run`. Nothing accepts a connection from off this machine. |
 | **When it's off** | Until you pair the machine, the plugin is inert — `audiochatty run` on an unpaired machine makes no network call at all. A session started with plain `claude` sends nothing and receives nothing, ever. |
 | **Platform** | macOS and Linux. The pseudo-terminal `audiochatty run` is built on doesn't exist on Windows. |
@@ -123,7 +130,10 @@ first thing to run if a session never shows up.
 
 Work normally — the terminal looks no different, which is measured rather than hoped: about
 34 microseconds per keystroke and nothing at all on redraw throughput — and each completed
-turn shows up in your inbox under that name.
+turn shows up in your inbox under that name. The one visible change is that permission
+prompts, `AskUserQuestion`s, and plan approvals stop rendering in this session and freeze the
+terminal instead, waiting for you to decide by voice — see "Exactly what happens when Claude
+Code stops to ask you something" below.
 
 | Command | What it does |
 | --- | --- |
@@ -133,10 +143,11 @@ turn shows up in your inbox under that name.
 | `/audiochatty-status` | Is this machine paired, is this session connected, can it be talked to. Entirely local — no network call. |
 | `/audiochatty-disconnect` | Stop sending and stop receiving. The machine stays paired and the session keeps running, and it stays disconnected until you run `/audiochatty-connect` — nothing automatic brings it back. |
 
-Every other terminal you have open does nothing at all: the `Stop` hook is global, so it
-runs everywhere, looks for a marker file for that session, finds none, and exits. A session
-started with plain `claude` has no return path to begin with, and any other `audiochatty run`
-you have open sits unbound and idle.
+Every other terminal you have open does nothing at all: the `Stop` and `PermissionRequest`
+hooks are both global, so they run everywhere, look for a marker file for that session, find
+none, and exit — a permission prompt in an unconnected terminal renders exactly as it always
+has. A session started with plain `claude` has no return path to begin with, and any other
+`audiochatty run` you have open sits unbound and idle.
 
 To turn everything off: `claude plugin disable audiochatty`, and go back to starting sessions
 with `claude`. To remove it: `claude plugin uninstall audiochatty` and `rm -rf ~/.audiochatty`.
@@ -212,6 +223,43 @@ reply path, so the way you hear what happened is the summary of the turn your in
 caused. `wrapper/README.md` documents the rest: the poll, the dedupe, and the limits on what
 that process can do.
 
+## Exactly what happens when Claude Code stops to ask you something
+
+This is the third direction, and it works differently from the other two: instead of
+reporting or typing, `scripts/permission_hook.py` **answers in place of the dialog**, so the
+dialog never renders at all. It covers everything Claude Code would otherwise stop and wait
+for a keypress on — a `Bash` or `Edit` approval, an `AskUserQuestion`, an `ExitPlanMode` plan
+— because all three fire the same `PermissionRequest` hook under the hood.
+
+In a connected session, the terminal freezes and audiochatty sends you the question:
+
+- **A tool approval** reads out the tool name and a short summary of what it would do (the
+  command for `Bash`, the path for a file edit) and offers two options: allow it, or don't.
+- **A multiple-choice question** (`AskUserQuestion`) reads out the real options from the
+  question itself, one at a time if there's more than one. Answering doesn't just approve
+  the tool call — the chosen option is written into it, so Claude proceeds exactly as if
+  you'd picked it at the keyboard and the picker never appears.
+- **A plan approval** (`ExitPlanMode`) doesn't read the whole plan aloud — plans run past
+  5,000 characters — it reads a short summary (the headings and the size) and asks you to
+  approve or hold off.
+
+You answer by picking one of the options out loud, the same way you'd answer any other
+audiochatty question. The terminal un-freezes the moment your answer arrives — no typing,
+no returning to the keyboard.
+
+**The freeze lasts up to 10 minutes**, and it can end four other ways, all of which fall
+through to Claude Code's own dialog exactly as if this hook didn't exist: the session isn't
+connected, the backend can't be reached, the hold runs out before you answer, or the answer
+doesn't match one of the options offered. **None of those is ever treated as a decision** —
+the hook never auto-allows and never auto-denies. Silence from this hook means "show the
+normal dialog," nothing else, and that rule is deliberately the same one `hooks/hooks.json`
+documents for every other hook in this plugin.
+
+**A permission prompt in *every other* terminal on the machine is untouched.** Like the
+`Stop` hook, this one's first move is checking for that session's marker file; a session
+started with plain `claude`, or one you've disconnected, never freezes and never sees this
+hook do anything.
+
 ---
 
 ## When something isn't working
@@ -243,19 +291,32 @@ likelihood:
   other way are not lost, though: they wait, and arrive when the backend answers again.
 - **The device was revoked.** Everything gets a 401 and stays silent. Run
   `/audiochatty-pair-start` and `/audiochatty-pair-finish` to pair again.
+- **A permission prompt isn't freezing, and you expected it to.** Check the same things as
+  above — is this session connected, is the backend reachable — and remember it's expected
+  behaviour for a payload this hook won't attempt: a `multiSelect` question, more than four
+  questions at once, or a question with fewer than two options. Those fall through to the
+  normal dialog on purpose.
+- **A permission prompt froze and nothing ever answered it.** After 10 minutes it gives up
+  and shows the dialog anyway — that's the hold expiring, not a hang. If it comes back
+  before then, someone (or something) else already answered it.
 
 To see what the hook is actually deciding:
 
 ```bash
 echo '{"session_id":"<your-session-id>","last_assistant_message":"test"}' \
   | AUDIOCHATTY_DEBUG=1 python3 ~/.claude/plugins/.../scripts/stop_hook.py
+
+echo '{"session_id":"<your-session-id>","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+  | AUDIOCHATTY_DEBUG=1 python3 ~/.claude/plugins/.../scripts/permission_hook.py
 ```
 
-`AUDIOCHATTY_DEBUG=1` puts one line on stderr per hook run and changes nothing else. The
-same variable makes `/audiochatty-connect` explain which wrapper it found and why it accepted
-or refused it, and makes `audiochatty run` narrate its own connect at launch plus what it polls
-and types in. Stderr only, never stdout — for `SessionStart` in particular, stdout would be fed
-to the model as context.
+`AUDIOCHATTY_DEBUG=1` puts one line on stderr per hook run and changes nothing else — for
+`permission_hook.py` that includes *why* it fell through, which is the fastest way to tell
+"nobody answered in time" from "this session isn't connected" from "the backend didn't
+respond." The same variable makes `/audiochatty-connect` explain which wrapper it found and
+why it accepted or refused it, and makes `audiochatty run` narrate its own connect at launch
+plus what it polls and types in. Stderr only, never stdout — for `SessionStart` in
+particular, stdout would be fed to the model as context.
 
 ### Pointing at a different backend
 
@@ -282,7 +343,7 @@ real subprocess with a real pseudo-terminal and a fake `claude`, with `AUDIOCHAT
 pointed at a temp directory — so they're safe to run on a machine that is already paired, and
 they assert on what was actually sent over the wire and what actually reached the child.
 
-Three things worth knowing if you change this code:
+Four things worth knowing if you change this code:
 
 - **`scripts/stop_hook.py` must never be slow and must never raise.** It runs at the end of
   every turn in every session on the machine. The marker-file check comes first for that
@@ -297,6 +358,11 @@ Three things worth knowing if you change this code:
 - **A session name containing a double quote won't survive** the shell line in
   `commands/audiochatty-connect.md`, since `$ARGUMENTS` is substituted as text. Use plain
   names.
+- **`scripts/permission_hook.py` must print nothing on every failure path**, which is the
+  opposite instinct from most error handling. Exit 0 with empty stdout is how it tells
+  Claude Code "show the normal dialog"; printing anything else — even a `deny` meant as a
+  safe default — would turn a voice channel going quiet into a decision nobody made.
+  `tests/test_permission_hook.py::TestFallsThrough` is what pins this down.
 
 ## License
 

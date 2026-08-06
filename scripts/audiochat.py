@@ -639,7 +639,7 @@ def _print_relaunch(reason: str) -> None:
     print("That starts the same Claude Code you already use, but messages are sent to Audiochatty.")
     print()
     print("If `audiochatty` isn't a command on this machine yet, add it to your")
-    print("shell profile (i.e., `sudo vi ~/.zshrc` ):")
+    print("shell profile (i.e., `vi ~/.zshrc` ):")
     print()
     print(f'    alias audiochatty="{WRAPPER_LAUNCHER}"')
 
@@ -926,7 +926,7 @@ def _pair_complete(response: dict, base: str) -> int:
     # descriptions, the README, and here — and this is the only one whose words we fully
     # control and the only one the user is looking at when the step is actually due. So it
     # carries the command and the reason, not a pointer to somewhere else that carries them.
-    print("Next, let's create a shortcut command for starting an audiochatty session. Quit Claude Code and add this line to your shell profile (sudo vi ~/.zshrc or sudo vi ~/.bashrc).")
+    print("Next, let's create a shortcut command for starting an audiochatty session. Quit Claude Code and add this line to your shell profile (vi ~/.zshrc or vi ~/.bashrc).")
     print()
     print(f'    alias audiochatty="{WRAPPER_LAUNCHER}"')
     print('')
