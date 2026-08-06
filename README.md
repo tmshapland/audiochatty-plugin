@@ -1,12 +1,37 @@
 # audiochatty for Claude Code
 
+## TL;DR
+
+This plugin lets you talk to a Claude Code session with voice.
+
+It works by wrapping Claude Code in a pseudo-terminal. `audiochatty run` opens a pseudo-terminal, starts `claude` inside it, and sits as a layer
+between you and the terminal running Claude Code. Every key you actually press still passes straight through to Claude Code,
+but the wrapper can also type into it on its own. 
+
+Messages get routed through a backend that both ends poll or push to. When a turn finishes, a hook on your laptop sends a short summary
+of it to the backend. The frontend web app fetches it from there and reads
+it out. When you talk back, that same web app sends a tidied version of what you said to the backend. The wrapper on your laptop polls the
+backend, sees it, and types it into the pseudo-terminal. Permission prompts work the same way,
+just synchronous and blocking: the terminal freezes, the question goes to the backend, you
+answer from the web app, and the answer comes back the same path. The plugin code itself never talks to
+the web app directly. Instead it only ever talks to whatever backend URL it's configured with.
+
+**There's a hosted version of the frontend and voice agent at audiochatty.com**, and pairing
+against it is the default if you don't configure anything else. But that backend is just an
+implementation of a documented HTTP protocol (see "Exactly what the hook sends" and "Pointing
+at a different backend" below). Nothing about the plugin requires it. Point
+`AUDIOCHATTY_BACKEND_URL` at your own backend and pair against that instead, and you can build
+your own frontend and voice agent behind it.
+
+---
+
 Talk to a Claude Code session from wherever you are. When a session you've opted in finishes
 a turn, a short spoken summary of what it did shows up in your
 [audiochatty](https://github.com/tmshapland) inbox. You listen to it, ask follow-up
 questions out loud — and say what to do next, which arrives in that session as a prompt. And
 when Claude Code stops to ask *you* something — a permission prompt, a multiple-choice
 question, a plan to approve — the terminal freezes and audiochatty asks instead, so the
-decision can come from your phone rather than whoever happens to be at the keyboard.
+decision can come from wherever you have audiochatty open rather than whoever happens to be at the keyboard.
 
 ```
 you, away from your desk                  this laptop
@@ -46,6 +71,8 @@ below is in this repo, in the files it names.
 
 ## Install
 
+The easiest path is to use the audiochatty.com frontend. Click the '+' button and follow the directions for connecting an agent.
+
 ```bash
 claude plugin marketplace add tmshapland/audiochatty-plugin
 claude plugin install audiochatty@audiochatty
@@ -65,19 +92,17 @@ Then, once per machine:
   After you enter the code, run /audiochatty:audiochatty-pair-finish here in Claude Code.
 ```
 
-Open audiochatty in a browser — you're already signed in — go to **Settings → Link a coding
-agent**, and type the code. Then run the second half:
+Go back to audiochatty in a browser, click the link for the pairing page, and type the code. Then run the second half:
 
 ```
 > /audiochatty-pair-finish
-  Linked to Mike's Workspace as Mike.
 
   Next, let's create a shortcut command for starting an audiochatty session. Quit
-  Claude Code and add this line to your shell profile (~/.zshrc or ~/.bashrc).
+  Claude Code and add this line to your shell profile (vi ~/.zshrc or vi ~/.bashrc).
 
       alias audiochatty="/path/to/audiochat-plugin/wrapper/audiochatty"
 
-  After you add the shortcut to your shell profile (~/.zshrc or ~/.bashrc), open a
+  After you add the shortcut to your shell profile, open a
   new terminal so it takes effect.
 
   To connect Audiochatty to a Claude Code session, start Claude Code with the shortcut:
@@ -86,30 +111,23 @@ agent**, and type the code. Then run the second half:
   That connects the session for you — there's nothing else to run inside it.
 ```
 
-Neither half minds being run out of order: `/audiochatty-pair-start` on a machine that
-already has a live code shows you that code again rather than replacing it, and
-`/audiochatty-pair-finish` with nothing pending tells you whether you're already paired or
-haven't started.
-
 **Why two commands, and why a code instead of a token.** A slash command's output is
 substituted into the prompt *after* the command exits, so a single command that minted a
 code and then waited would only show you the code once it had already given up waiting.
-That forces two runs; giving them two names is what stops the second one looking like a
-retry of the first.
+
 And the reason it's a code at all: anything typed into a Claude Code prompt is written to
 the session `.jsonl` on disk and loaded into the model's context. A pasted token would
 live there forever. So the terminal displays something short and disposable, and the
-long-lived token travels back over a path the transcript never sees — from the backend
-straight into a 0600 file. **The plugin will never ask you to paste a token, and no
-command here accepts one as an argument.**
+long-lived token travels back over a path the transcript never sees from the backend
+straight into a 0600 file. 
 
 **Why you start it with `audiochatty run` and not `claude`.** The second arrow in the
 diagram above has to type into a session that is already running, and nothing *inside* a
 session can do that. So `audiochatty run` starts Claude Code inside a pseudo-terminal it
-owns, passes your keystrokes straight through, and types in what you speak from your phone.
-Claude Code can't tell: there's no plugin to load, no launch flag, and no warning dialog —
-from the session's point of view, somebody typed something. Everything after `run` is passed
-to `claude` unchanged, so `audiochatty run --model opus` and `audiochatty run -- --resume`
+owns, passes your keystrokes straight through, and types in what you speak into audiochatty.
+Claude Code can't tell: there's no plugin to load, no launch flag, and no warning dialog.
+From the session's point of view, somebody typed something. Everything after `run` is passed
+to `claude` unchanged, so `audiochatty run --model claude-opus-4-8` and `audiochatty run -- --resume`
 work the way you'd expect. `wrapper/README.md` is the detail, including what that process can
 and can't do.
 
@@ -119,20 +137,20 @@ and can't do.
 $ audiochatty run                      # or: audiochatty run --name billing-refactor
 ```
 
-That's it — one command, and the session shows up in audiochatty under the current folder's
+One command, and the session shows up in audiochatty under the current folder's
 name. There is no second step and nothing to type into the session.
 
 **It connects silently, on purpose.** The terminal belongs to Claude Code's interface, and a
-line printed into it is a corrupted screen — so the confirmation is the session appearing in
+line printed into it is a corrupted screen. The confirmation is the session appearing in
 your inbox. The flip side is that a connect which *fails* (audiochatty unreachable, a revoked
 device) is also invisible: `/audiochatty-status` is where that reason surfaces, and it's the
 first thing to run if a session never shows up.
 
-Work normally — the terminal looks no different, which is measured rather than hoped: about
-34 microseconds per keystroke and nothing at all on redraw throughput — and each completed
+Work normally. The terminal looks no different, which is measured rather than hoped: about
+34 microseconds per keystroke and nothing at all on redraw throughput, and each completed
 turn shows up in your inbox under that name. The one visible change is that permission
 prompts, `AskUserQuestion`s, and plan approvals stop rendering in this session and freeze the
-terminal instead, waiting for you to decide by voice — see "Exactly what happens when Claude
+terminal instead, waiting for you to decide by voice. See "Exactly what happens when Claude
 Code stops to ask you something" below.
 
 | Command | What it does |
@@ -145,15 +163,14 @@ Code stops to ask you something" below.
 
 Every other terminal you have open does nothing at all: the `Stop` and `PermissionRequest`
 hooks are both global, so they run everywhere, look for a marker file for that session, find
-none, and exit — a permission prompt in an unconnected terminal renders exactly as it always
+none, and exit. A permission prompt in an unconnected terminal renders exactly as it always
 has. A session started with plain `claude` has no return path to begin with, and any other
 `audiochatty run` you have open sits unbound and idle.
 
 To turn everything off: `claude plugin disable audiochatty`, and go back to starting sessions
 with `claude`. To remove it: `claude plugin uninstall audiochatty` and `rm -rf ~/.audiochatty`.
-To kill a machine you no longer have — a stolen laptop, an old work machine — revoke its token
-from **Settings → Linked devices** in audiochatty; the next thing it sends gets a 401 and the
-next thing it polls for gets nothing.
+To kill a machine you no longer have, revoke its token
+from **Settings → Linked devices** in audiochatty.
 
 ---
 
@@ -178,8 +195,7 @@ nothing else:
   transcript. Names only: no arguments, no file contents, no command lines, no output.
 - **`stop_reason`**, **`cwd`** — how the turn ended, and which repo it was.
 
-The payload is built from scratch out of those keys, so nothing else from the hook's input
-— not `transcript_path`, not `permission_mode` — is ever transmitted. Your prompts are not
+The payload is built from scratch out of those keys, so nothing else from the hook's input is ever transmitted. Your prompts are not
 sent. Your code is not sent. The backend caps every field again on arrival.
 
 **Where it goes afterwards.** The backend queues it, and a worker rewrites it into
@@ -194,15 +210,17 @@ terminal.
 ## Exactly what the wrapper types into your session
 
 The other direction, and the same promise. What arrives is not an event, a notification, or
-anything with a wrapper of its own — it is your words, at the prompt:
+anything with a wrapper of its own. It is your words, at the prompt:
 
 ```
 > change that back, and use the other helper instead
 ```
 
-That's the whole of it. The text is what you dictated, verbatim — audiochatty transcribed it,
-nobody rewrote it — and it goes in exactly where your own typing goes, so Claude Code treats
-it as your own typing because that is what it is.
+That's the whole of it. What arrives is a tidied rendering of what you said, not a verbatim
+transcript: audiochatty's voice agent transcribes it, then cleans up false starts and joins
+fragments the way you'd expect from something meant to be read cold. It is instructed to add
+nothing, resolve nothing on your behalf, and leave nothing out. It goes in exactly where your
+own typing goes, so Claude Code treats it as your own typing because that is what it is.
 
 Three things about *how* it is typed, all of which look like bugs and aren't:
 
@@ -228,8 +246,7 @@ that process can do.
 This is the third direction, and it works differently from the other two: instead of
 reporting or typing, `scripts/permission_hook.py` **answers in place of the dialog**, so the
 dialog never renders at all. It covers everything Claude Code would otherwise stop and wait
-for a keypress on — a `Bash` or `Edit` approval, an `AskUserQuestion`, an `ExitPlanMode` plan
-— because all three fire the same `PermissionRequest` hook under the hood.
+for a keypress on — a `Bash` or `Edit` approval, an `AskUserQuestion`, an `ExitPlanMode` plan because all three fire the same `PermissionRequest` hook under the hood.
 
 In a connected session, the terminal freezes and audiochatty sends you the question:
 
@@ -237,21 +254,19 @@ In a connected session, the terminal freezes and audiochatty sends you the quest
   command for `Bash`, the path for a file edit) and offers two options: allow it, or don't.
 - **A multiple-choice question** (`AskUserQuestion`) reads out the real options from the
   question itself, one at a time if there's more than one. Answering doesn't just approve
-  the tool call — the chosen option is written into it, so Claude proceeds exactly as if
+  the tool call. The chosen option is written into it, so Claude proceeds exactly as if
   you'd picked it at the keyboard and the picker never appears.
-- **A plan approval** (`ExitPlanMode`) doesn't read the whole plan aloud — plans run past
-  5,000 characters — it reads a short summary (the headings and the size) and asks you to
+- **A plan approval** (`ExitPlanMode`) doesn't read the whole plan aloud, but instead it reads a short summary (the headings and the size) and asks you to
   approve or hold off.
 
 You answer by picking one of the options out loud, the same way you'd answer any other
-audiochatty question. The terminal un-freezes the moment your answer arrives — no typing,
-no returning to the keyboard.
+audiochatty question. The terminal un-freezes the moment your answer arrives.
 
 **The freeze lasts up to 10 minutes**, and it can end four other ways, all of which fall
 through to Claude Code's own dialog exactly as if this hook didn't exist: the session isn't
 connected, the backend can't be reached, the hold runs out before you answer, or the answer
-doesn't match one of the options offered. **None of those is ever treated as a decision** —
-the hook never auto-allows and never auto-denies. Silence from this hook means "show the
+doesn't match one of the options offered. 
+The hook never auto-allows and never auto-denies. Silence from this hook means "show the
 normal dialog," nothing else, and that rule is deliberately the same one `hooks/hooks.json`
 documents for every other hook in this plugin.
 
@@ -274,17 +289,17 @@ It answers all of this locally, including which half is broken. Then, in order o
 likelihood:
 
 - **The session was started with `claude`, not `audiochatty run`.** There is nothing that can
-  type into it, so nothing connected it — and `/audiochatty-connect` refuses outright rather
+  type into it, so nothing connected it. `/audiochatty-connect` refuses outright rather
   than half-connecting, printing the command to start again with. This is the common one, and
   `audiochatty run` is per session: a new terminal needs it again.
-- **The connect failed at launch and said nothing.** It can't say anything — the screen belongs
+- **The connect failed at launch and said nothing.** It can't say anything. The screen belongs
   to Claude Code. `/audiochatty-status` names the reason (unreachable backend, revoked device),
   and `/audiochatty-connect` retries without restarting the session.
 - **The session was disconnected earlier.** It stays that way deliberately, including across a
   `/clear`. `/audiochatty-connect` is the only thing that brings it back.
 - **An instruction hasn't appeared yet.** Give it 30 seconds — that's the slow end of the
   poll — and check you aren't mid-way through typing a line, which makes the wrapper wait.
-- **The backend is asleep or down.** Turns are dropped silently — that is deliberate, since
+- **The backend is asleep or down.** Turns are dropped silently. That is deliberate, since
   a hook that waits on the network is a hook you feel on every turn. After one failure the
   plugin skips the network entirely for 60 seconds rather than paying the timeout again.
   Nothing is retried; a turn that couldn't be delivered is gone. Instructions coming the
@@ -297,7 +312,7 @@ likelihood:
   questions at once, or a question with fewer than two options. Those fall through to the
   normal dialog on purpose.
 - **A permission prompt froze and nothing ever answered it.** After 10 minutes it gives up
-  and shows the dialog anyway — that's the hold expiring, not a hang. If it comes back
+  and shows the dialog anyway. If it comes back
   before then, someone (or something) else already answered it.
 
 To see what the hook is actually deciding:
@@ -342,27 +357,6 @@ The tests run every script as a subprocess against a stub HTTP server, and the w
 real subprocess with a real pseudo-terminal and a fake `claude`, with `AUDIOCHATTY_HOME`
 pointed at a temp directory — so they're safe to run on a machine that is already paired, and
 they assert on what was actually sent over the wire and what actually reached the child.
-
-Four things worth knowing if you change this code:
-
-- **`scripts/stop_hook.py` must never be slow and must never raise.** It runs at the end of
-  every turn in every session on the machine. The marker-file check comes first for that
-  reason, and there's a test that fails if an unreachable backend costs more than one
-  timeout.
-- **A slash command finds its wrapper through one inherited environment variable**, not by
-  inspecting processes. `AUDIOCHATTY_WRAPPER_PORT` and `AUDIOCHATTY_WRAPPER_PID` are set in the
-  environment `claude` is started with, so everything the session runs can read them. The
-  wrapper also mints its child's session id up front and publishes it, which is what lets
-  `/audiochatty-connect` refuse to bind a *nested* plain `claude` that inherited those
-  variables without owning them.
-- **A session name containing a double quote won't survive** the shell line in
-  `commands/audiochatty-connect.md`, since `$ARGUMENTS` is substituted as text. Use plain
-  names.
-- **`scripts/permission_hook.py` must print nothing on every failure path**, which is the
-  opposite instinct from most error handling. Exit 0 with empty stdout is how it tells
-  Claude Code "show the normal dialog"; printing anything else — even a `deny` meant as a
-  safe default — would turn a voice channel going quiet into a decision nobody made.
-  `tests/test_permission_hook.py::TestFallsThrough` is what pins this down.
 
 ## License
 
