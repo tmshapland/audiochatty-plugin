@@ -2,36 +2,17 @@
 
 ## TL;DR
 
-This plugin lets you talk to a Claude Code session with voice.
+This plugin lets you talk to a Claude Code session with your voice.
 
 It works by wrapping Claude Code in a pseudo-terminal. `audiochatty run` opens a pseudo-terminal, starts `claude` inside it, and sits as a layer
 between you and the terminal running Claude Code. Every key you actually press still passes straight through to Claude Code,
 but the wrapper can also type into it on its own. 
 
-Messages get routed through a backend that both ends poll or push to. When a turn finishes, a hook on your laptop sends a short summary
-of it to the backend. The frontend web app fetches it from there and reads
-it out. When you talk back, that same web app sends a tidied version of what you said to the backend. The wrapper on your laptop polls the
-backend, sees it, and types it into the pseudo-terminal. Permission prompts work the same way,
-just synchronous and blocking: the terminal freezes, the question goes to the backend, you
-answer from the web app, and the answer comes back the same path. The plugin code itself never talks to
-the web app directly. Instead it only ever talks to whatever backend URL it's configured with.
-
-**There's a hosted version of the frontend and voice agent at audiochatty.com**, and pairing
-against it is the default if you don't configure anything else. But that backend is just an
-implementation of a documented HTTP protocol (see "Exactly what the hook sends" and "Pointing
-at a different backend" below). Nothing about the plugin requires it. Point
-`AUDIOCHATTY_BACKEND_URL` at your own backend and pair against that instead, and you can build
-your own frontend and voice agent behind it.
-
----
-
-Talk to a Claude Code session from wherever you are. When a session you've opted in finishes
+The pseudo-terminal allows you talk to a Claude Code session from wherever you are. When a session you've opted in finishes
 a turn, a short spoken summary of what it did shows up in your
-[audiochatty](https://github.com/tmshapland) inbox. You listen to it, ask follow-up
-questions out loud — and say what to do next, which arrives in that session as a prompt. And
-when Claude Code stops to ask *you* something — a permission prompt, a multiple-choice
-question, a plan to approve — the terminal freezes and audiochatty asks instead, so the
-decision can come from wherever you have audiochatty open rather than whoever happens to be at the keyboard.
+[audiochatty](https://audiochatty.com) inbox. You listen to it, ask follow-up
+questions out loud,m and say what to do next, which then gets executed in that Claude Code session.
+When Claude Code stops to ask you something, the terminal freezes and audiochatty asks you instead. Your response is executed in Claude Code. 
 
 ```
 you, away from your desk                  this laptop
@@ -41,13 +22,9 @@ you, away from your desk                  this laptop
   decide, out loud       ◀─▶ audiochatty ◀─▶ scripts/permission_hook.py ◀─▶ a blocked permission prompt
 ```
 
-All three are opt-in per session, and all three stop when you disconnect. The second row is
-the one to read carefully: **what you say into audiochatty is typed into a coding agent that
-edits files and runs commands on this machine.** It is exactly as powerful as typing the same
+All three are opt-in per session, and all three stop when you disconnect. What you say into audiochatty is typed into a coding agent that edits files and runs commands on this machine. It is exactly as powerful as typing the same
 words into the terminal yourself, which is the point, and it is worth knowing before you
-connect a session. The third row goes further still — it doesn't type a request, it
-**decides**: allow or deny a tool call, approve or reject a plan, pick one of a handful of
-options, on your say-so and without anyone touching the keyboard.
+connect a session. 
 
 ---
 
@@ -360,4 +337,4 @@ they assert on what was actually sent over the wire and what actually reached th
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+PolyForm Shield 1.0.0 — free to use, but not to build a competing product. See [LICENSE](LICENSE).

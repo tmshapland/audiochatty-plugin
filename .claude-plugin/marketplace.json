@@ -11,7 +11,7 @@
       "source": "./",
       "description": "Hear what a Claude Code session did, and tell it what to do next, by voice. Sessions started with `audiochatty run` can be talked back to.",
       "category": "productivity",
-      "license": "MIT"
+      "license": "SEE LICENSE IN LICENSE"
     }
   ]
 }
